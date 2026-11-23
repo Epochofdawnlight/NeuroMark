@@ -5,6 +5,10 @@ import ExcelJS from 'exceljs';
 import { getDatabase } from '@main/database/client';
 import type { ProjectService } from '@main/services/projectService';
 import type { PaperRecord } from '@preload/contracts';
+import {
+  DEFAULT_HISTORY_CONCURRENCY,
+  MAX_HISTORY_CONCURRENCY,
+} from '@preload/history';
 import type {
   HistoryDraft,
   ExamMaterialFile,
@@ -29,8 +33,8 @@ import {
 import {
   cropHistorySource,
   gradeHistoryAnswer,
+  gradeHistoryImage,
   testHistoryConnection,
-  transcribeHistoryAnswer,
   type HistoryConnection,
   type HistoryTranscript,
 } from './historyModels';
@@ -320,8 +324,19 @@ export class HistoryService {
     );
   }
 
-  private effectiveProviders(state: Workspace): StoredProviders {
-    return { ...state.providers, ...this.savedDefaults() };
+  private effectiveProviders(
+    state: Workspace,
+    saved = this.savedDefaults(),
+  ): StoredProviders {
+    const model =
+      saved.recognition ??
+      saved.grading ??
+      (state.providers.recognition.encryptedKey
+        ? state.providers.recognition
+        : state.providers.grading.encryptedKey
+          ? state.providers.grading
+          : state.providers.recognition);
+    return { recognition: model, grading: model };
   }
 
   private writeDefault(role: Role, endpoint: StoredEndpoint): void {
@@ -344,7 +359,12 @@ export class HistoryService {
     input: HistoryEndpointInput,
   ): Promise<void> {
     parseRole(role);
-    this.writeDefault(role, updateEndpoint(input, this.savedDefaults()[role]));
+    const saved = this.savedDefaults();
+    const prior =
+      role === 'recognition'
+        ? this.effectiveProviders(emptyWorkspace(), saved).recognition
+        : saved.grading;
+    this.writeDefault(role, updateEndpoint(input, prior));
   }
 
   async testDefaultProvider(role: Role): Promise<void> {
@@ -360,10 +380,9 @@ export class HistoryService {
     await this.projects.getProjectById(projectId);
     const state = this.load(projectId);
     const saved = this.savedDefaults();
-    for (const role of providerRoles) {
-      if (!saved[role] && state.providers[role].encryptedKey)
-        this.writeDefault(role, state.providers[role]);
-    }
+    if (saved.recognition || saved.grading) return;
+    const model = this.effectiveProviders(state, saved).recognition;
+    if (model.encryptedKey) this.writeDefault('recognition', model);
   }
 
   async previewRegions(
@@ -479,7 +498,7 @@ export class HistoryService {
     await this.projects.getProjectById(projectId);
     const state = this.load(projectId);
     const saved = this.savedDefaults();
-    const providers = { ...state.providers, ...saved };
+    const providers = this.effectiveProviders(state, saved);
     const needsRegionReview =
       !state.draft.fullPageRegionsConfirmed &&
       state.draft.questions.length > 0 &&
@@ -492,9 +511,10 @@ export class HistoryService {
         : state.draft,
       needsRegionReview,
       providers: providersFor(providers),
-      canAdoptProviders: providerRoles.some(
-        (role) => !saved[role] && state.providers[role].encryptedKey,
-      ),
+      canAdoptProviders:
+        !saved.recognition &&
+        !saved.grading &&
+        Boolean(providers.recognition.encryptedKey),
       approvedTrialId: this.approved(state, providers)
         ? state.approvedTrialId
         : undefined,
@@ -603,9 +623,16 @@ export class HistoryService {
     kind: HistoryRun['kind'],
     sampleSize = 10,
     repeat = false,
+    concurrency = DEFAULT_HISTORY_CONCURRENCY,
   ): Promise<void> {
     if (kind !== 'formal' && kind !== 'trial')
       throw new Error('未知的批阅类型。');
+    if (
+      !Number.isInteger(concurrency) ||
+      concurrency < 1 ||
+      concurrency > MAX_HISTORY_CONCURRENCY
+    )
+      throw new Error(`并发数须为 1 到 ${MAX_HISTORY_CONCURRENCY} 的整数。`);
     this.ensureIdle(projectId);
     this.active.add(projectId);
     try {
@@ -615,7 +642,7 @@ export class HistoryService {
         throw new Error('请先核对并确认整页答题区域。');
       const draft = validateHistoryDraft(state.draft, true);
       const providers = this.effectiveProviders(state);
-      const connections = this.connections(providers);
+      const model = connectionFor(providers.grading);
       if (!papers.length) throw new Error('项目中没有答卷。');
       if (kind === 'formal' && !this.approved(state, providers))
         throw new Error('请先通过当前版本的教师试阅。');
@@ -648,6 +675,8 @@ export class HistoryService {
         revision: state.revision,
         providerRevision: state.providerRevision,
         providerSignature: providerSignature(providers),
+        scoringMode: 'image',
+        concurrency,
         providers: providersFor(providers),
         draft,
         sampledPapers: selected.length,
@@ -656,6 +685,7 @@ export class HistoryService {
           kind === 'trial' &&
           repeat &&
           previous &&
+          previous.scoringMode === 'image' &&
           sameProviders(previous, state, providers)
             ? reuseTrialRows(rows, draft, previous)
             : rows,
@@ -666,18 +696,11 @@ export class HistoryService {
       state[kind] = run;
       if (kind === 'trial') state.approvedTrialId = undefined;
       this.write(projectId, state);
-      void this.process(projectId, state, run, connections);
+      void this.process(projectId, state, run, model);
     } catch (error) {
       this.active.delete(projectId);
       throw error;
     }
-  }
-
-  private connections(providers: StoredProviders) {
-    return {
-      recognition: connectionFor(providers.recognition),
-      grading: connectionFor(providers.grading),
-    };
   }
 
   async resume(projectId: string, runId: string): Promise<void> {
@@ -688,6 +711,8 @@ export class HistoryService {
     if (!run.draft.fullPageRegionsConfirmed)
       throw new Error('请核对整页答题区域，再开始新的试阅。');
     const providers = this.effectiveProviders(state);
+    if (run.scoringMode !== 'image')
+      throw new Error('该批次使用旧版识别流程，请重新试阅。');
     if (
       state[run.kind]?.id !== run.id ||
       run.status === 'confirmed' ||
@@ -695,7 +720,7 @@ export class HistoryService {
     ) {
       throw new Error('请使用原模型设置重试当前批次，或重新开始试阅。');
     }
-    const connections = this.connections(providers);
+    const model = connectionFor(providers.grading);
     for (const row of run.rows) {
       if (
         row.status === 'error' &&
@@ -712,7 +737,7 @@ export class HistoryService {
     run.status = 'running';
     try {
       this.write(projectId, state);
-      void this.process(projectId, state, run, connections);
+      void this.process(projectId, state, run, model);
     } catch (error) {
       this.active.delete(projectId);
       throw error;
@@ -723,51 +748,91 @@ export class HistoryService {
     projectId: string,
     state: Workspace,
     run: HistoryRun,
-    connections: ReturnType<HistoryService['connections']>,
+    model: HistoryConnection,
   ): Promise<void> {
     try {
-      for (const row of run.rows) {
-        if (row.status !== 'pending') continue;
-        try {
-          if (row.choiceOrientation) {
+      const pending = run.rows.filter((row) => row.status === 'pending');
+      let next = 0;
+      let writeFailed = false;
+      const work = async () => {
+        while (!writeFailed) {
+          const row = pending[next++];
+          if (!row) return;
+          try {
             const manual = state.transcriptions[row.cacheKey];
-            const mark = manual
-              ? this.manualMark(manual.text)
-              : await readOpticalMarks(
-                  await cropHistorySource(row.sources[0]),
-                  row.choiceOrientation,
-                );
-            this.gradeChoiceRow(row, mark, run);
-            this.write(projectId, state);
-            continue;
+            if (row.choiceOrientation) {
+              const mark = manual
+                ? this.manualMark(manual.text)
+                : await readOpticalMarks(
+                    await cropHistorySource(row.sources[0]),
+                    row.choiceOrientation,
+                  );
+              this.gradeChoiceRow(row, mark, run);
+            } else {
+              await this.gradeImageRow(row, run, model, manual?.text);
+            }
+          } catch (error) {
+            row.status = 'error';
+            row.error = error instanceof Error ? error.message : '阅卷失败。';
           }
-          const autoKey = JSON.stringify([
-            run.providers.recognition.baseUrl,
-            run.providers.recognition.model,
-            row.cacheKey,
-          ]);
-          const stored =
-            state.transcriptions[row.cacheKey] ?? state.transcriptions[autoKey];
-          const recognized =
-            stored ??
-            (await transcribeHistoryAnswer(
-              connections.recognition,
-              await Promise.all(row.sources.map(cropHistorySource)),
-            ));
-          if (!stored) state.transcriptions[autoKey] = recognized;
-          await this.gradeRow(row, recognized, run, connections.grading);
-        } catch (error) {
-          row.status = 'error';
-          row.error = error instanceof Error ? error.message : '阅卷失败。';
+          try {
+            this.write(projectId, state);
+          } catch (error) {
+            writeFailed = true;
+            throw error;
+          }
         }
-        this.write(projectId, state);
-      }
+      };
+      const workCount = Math.min(
+        pending.length,
+        run.concurrency ?? DEFAULT_HISTORY_CONCURRENCY,
+      );
+      const results = await Promise.allSettled(
+        Array.from({ length: workCount }, work),
+      );
+      const failed = results.find((result) => result.status === 'rejected');
+      if (failed) throw failed.reason;
       run.status = 'review';
       this.write(projectId, state);
     } catch (error) {
       console.error('无法保存历史阅卷进度', error);
     } finally {
       this.active.delete(projectId);
+    }
+  }
+
+  private async gradeImageRow(
+    row: HistoryRow,
+    run: HistoryRun,
+    model: HistoryConnection,
+    teacherText?: string,
+  ) {
+    row.error = undefined;
+    row.grade = undefined;
+    row.audit = undefined;
+    row.transcript = teacherText;
+    if (teacherText === '') {
+      row.status = 'blank';
+      return;
+    }
+    const question = run.draft.questions.find(
+      (entry) => entry.id === row.questionId,
+    )!;
+    const result = await gradeHistoryImage(
+      model,
+      question,
+      run.draft,
+      await Promise.all(row.sources.map(cropHistorySource)),
+      teacherText,
+      row.sources.map(({ region }) => region),
+    );
+    row.transcript = result.text;
+    if (result.status === 'readable') {
+      row.grade = result.grade;
+      row.status = 'scored';
+    } else {
+      row.status = result.status;
+      row.error = result.reviewReason;
     }
   }
 
@@ -876,6 +941,13 @@ export class HistoryService {
       if (run.kind === 'trial') state.approvedTrialId = undefined;
       try {
         if (choice) this.gradeChoiceRow(row, choice, run);
+        else if (run.scoringMode === 'image')
+          await this.gradeImageRow(
+            row,
+            run,
+            connectionFor(providers.grading),
+            value,
+          );
         else
           await this.gradeRow(
             row,
@@ -937,6 +1009,7 @@ export class HistoryService {
       state.draft.fullPageRegionsConfirmed &&
       state.approvedTrialId &&
       state.trial?.id === state.approvedTrialId &&
+      state.trial.scoringMode === 'image' &&
       state.trial.revision === state.revision &&
       sameProviders(state.trial, state, providers),
     );
@@ -950,6 +1023,7 @@ export class HistoryService {
     if (
       !trial ||
       trial.id !== runId ||
+      trial.scoringMode !== 'image' ||
       trial.revision !== state.revision ||
       trial.status !== 'review' ||
       !sameProviders(trial, state, this.effectiveProviders(state))

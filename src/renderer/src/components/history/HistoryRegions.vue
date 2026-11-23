@@ -31,6 +31,8 @@ const paperId = ref<string>();
 const pageNumber = ref(0);
 const questionIndex = ref(0);
 const selectedBox = ref(-1);
+const drawThrough = ref(false);
+const copySourceIndex = ref<number | null>(null);
 const board = ref<HTMLElement>();
 const edit = ref<Edit>();
 const previews = ref<string[]>([]);
@@ -75,6 +77,12 @@ function regions(item: HistoryQuestion) {
   return (scope.value === 'paper' && overrideFor(item)) || item.regions;
 }
 
+function regionKey(region: HistoryRegion) {
+  return [region.page, region.x, region.y, region.width, region.height].join(
+    ':',
+  );
+}
+
 function setRegions(item: HistoryQuestion, next: HistoryRegion[]) {
   if (scope.value === 'template') {
     item.regions = next;
@@ -101,6 +109,49 @@ function useTemplate() {
   selectedBox.value = -1;
 }
 
+const copySources = computed(() =>
+  draft.value.questions.flatMap((item, index) => {
+    if (item.kind === 'choice' || item === question.value || !item.id.trim())
+      return [];
+    const count = regions(item).length;
+    return count
+      ? [{ value: index, label: `${item.id} · ${count} 个题框` }]
+      : [];
+  }),
+);
+
+const regionsToCopy = computed(() => {
+  const target = question.value;
+  const source =
+    copySourceIndex.value === null
+      ? undefined
+      : draft.value.questions[copySourceIndex.value];
+  if (
+    !target?.id.trim() ||
+    !source ||
+    source === target ||
+    source.kind === 'choice'
+  )
+    return [];
+
+  const seen = new Set(regions(target).map(regionKey));
+  return regions(source).filter((region) => {
+    const key = regionKey(region);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+});
+
+function copyRegions() {
+  const target = question.value;
+  if (props.disabled || !target || !regionsToCopy.value.length) return;
+  setRegions(target, [
+    ...regions(target),
+    ...regionsToCopy.value.map((region) => ({ ...region })),
+  ]);
+}
+
 const boxes = computed(() =>
   draft.value.questions.flatMap((item, qIndex) =>
     item.kind === 'choice'
@@ -110,23 +161,6 @@ const boxes = computed(() =>
           .filter(({ region }) => region.page === page.value?.pageIndex),
   ),
 );
-const overlap = computed(() =>
-  boxes.value.some((a, index) =>
-    boxes.value
-      .slice(index + 1)
-      .some(
-        (b) =>
-          a.qIndex !== b.qIndex &&
-          Math.min(a.region.x + a.region.width, b.region.x + b.region.width) -
-            Math.max(a.region.x, b.region.x) >
-            0.003 &&
-          Math.min(a.region.y + a.region.height, b.region.y + b.region.height) -
-            Math.max(a.region.y, b.region.y) >
-            0.003,
-      ),
-  ),
-);
-
 watch(
   () => [
     scope.value,
@@ -141,10 +175,20 @@ watch(
     feedback.value = '';
   },
 );
-watch([scope, paperId, pageNumber], () => {
+watch([scope, paper], () => {
   selectedBox.value = -1;
+});
+watch([scope, paper, page], () => {
   edit.value = undefined;
 });
+watch([scope, paper, question], () => {
+  copySourceIndex.value = null;
+});
+
+function selectPage(value: number) {
+  pageNumber.value = value;
+  selectedBox.value = -1;
+}
 
 function clamp(value: number, upper = 1) {
   return Math.min(upper, Math.max(0, value));
@@ -232,12 +276,11 @@ function finish(event: PointerEvent) {
   if (!dragged || dragged.pointer !== event.pointerId) return;
   edit.value = undefined;
   if (dragged.next.width < 0.006 || dragged.next.height < 0.006) return;
-  if (
-    dragged.index >= 0 &&
-    JSON.stringify(dragged.next) === JSON.stringify(dragged.original)
-  )
-    return;
+  const key = regionKey(dragged.next);
+  if (dragged.index >= 0 && key === regionKey(dragged.original)) return;
   const next = regions(dragged.question).slice();
+  if (dragged.index < 0 && next.some((region) => regionKey(region) === key))
+    return;
   const index = dragged.index < 0 ? next.length : dragged.index;
   next[index] = dragged.next;
   setRegions(dragged.question, next);
@@ -317,7 +360,7 @@ async function preview() {
                 value: item.pageIndex,
               }))
             "
-            @update:value="pageNumber = $event"
+            @update:value="selectPage"
         /></label>
         <label
           >当前题号
@@ -343,17 +386,27 @@ async function preview() {
             "
         /></label>
       </div>
+      <n-space align="center">
+        <n-button
+          size="small"
+          :type="drawThrough ? 'primary' : 'default'"
+          :aria-pressed="drawThrough"
+          :disabled="disabled"
+          @click="drawThrough = !drawThrough"
+          >在题框内画框</n-button
+        >
+        <span v-if="drawThrough">从页面任意位置拖拽，为当前小题画框。</span>
+        <span v-else>空白处拖拽画框，拖动题框移动，拖动右下角调整大小。</span>
+      </n-space>
       <p>
-        在页面空白处拖拽创建题框。拖动题框可移动，拖动右下角可调大小。跨页续写可为同一小题在不同页加框。
+        题框可以重叠或复用，同一小题也可以跨页加框。模型根据题意识别当前小题的作答。
       </p>
-      <n-alert v-if="overlap" type="warning"
-        >本页有不同小题的题框重叠，请核对是否包含了相邻作答。</n-alert
-      >
       <div class="region-layout">
         <div
           v-if="page?.scannedPath"
           ref="board"
           class="region-board"
+          :class="{ 'draw-through': drawThrough }"
           @pointerdown="begin($event, 'draw')"
           @pointermove="move"
           @pointerup="finish"
@@ -370,6 +423,7 @@ async function preview() {
             :key="`${box.qIndex}-${box.index}`"
             class="answer-box"
             :class="{
+              current: box.item === question,
               selected: box.item === question && box.index === selectedBox,
             }"
             :style="
@@ -383,7 +437,7 @@ async function preview() {
           >
             <span>{{ box.item.id }} · {{ box.index + 1 }}</span>
             <button
-              v-if="!disabled"
+              v-if="!disabled && !drawThrough"
               class="resize-box"
               type="button"
               aria-label="拖动缩放题框"
@@ -409,6 +463,27 @@ async function preview() {
             }}
           </p>
           <n-space vertical>
+            <template v-if="copySources.length">
+              <n-select
+                v-model:value="copySourceIndex"
+                size="small"
+                placeholder="选择要复制题框的小题"
+                aria-label="题框来源小题"
+                :options="copySources"
+                :disabled="disabled || !question.id.trim()"
+                filterable
+                clearable
+              />
+              <n-button
+                size="small"
+                :disabled="disabled || !regionsToCopy.length"
+                @click="copyRegions"
+                >复制题框</n-button
+              >
+              <small v-if="copySourceIndex !== null && !regionsToCopy.length">
+                当前小题已包含所选小题的题框。
+              </small>
+            </template>
             <div
               v-for="(region, index) in regions(question)"
               :key="index"
@@ -486,9 +561,13 @@ async function preview() {
   background: #28799619;
   cursor: move;
 }
+.answer-box.current {
+  z-index: 1;
+}
 .answer-box.selected {
   border-color: #b45b29;
   background: #b45b2925;
+  z-index: 2;
 }
 .answer-box span {
   position: absolute;
@@ -503,6 +582,10 @@ async function preview() {
 .answer-box.drawing {
   pointer-events: none;
   border-style: dashed;
+  z-index: 3;
+}
+.draw-through .answer-box {
+  pointer-events: none;
 }
 .resize-box {
   position: absolute;

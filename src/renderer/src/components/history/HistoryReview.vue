@@ -211,7 +211,7 @@ watch(
               >{{
                 question.kind === 'choice'
                   ? '识别选项（A–D，空白留空）'
-                  : '学生作答转录'
+                  : '有效作答转录'
               }}
               <n-input
                 v-model:value="transcript"

@@ -1,6 +1,7 @@
 import { once } from 'node:events';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -30,7 +31,7 @@ vi.mock('electron', () => ({
 type ModelRequest = { model: string; messages: { content: unknown }[] };
 
 async function modelServer(
-  reply: object | ((request: ModelRequest) => object),
+  reply: object | ((request: ModelRequest) => object | Promise<object>),
 ) {
   const requests: ModelRequest[] = [];
   const server = createServer(async (request, response) => {
@@ -46,7 +47,7 @@ async function modelServer(
             finish_reason: 'stop',
             message: {
               content: JSON.stringify(
-                typeof reply === 'function' ? reply(body) : reply,
+                typeof reply === 'function' ? await reply(body) : reply,
               ),
             },
           },
@@ -68,18 +69,24 @@ async function modelServer(
   };
 }
 
-it('reuses OCR during rubric revision and exports the teacher-confirmed formal batch', async () => {
+it('grades each image once with bounded concurrency and reuses unchanged trial results', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'neuromark-history-'));
-  const recognition = await modelServer({
-    status: 'readable',
-    text: '工商业发展',
+  let requestsInFlight = 0;
+  let peak = 0;
+  const vision = await modelServer(async () => {
+    peak = Math.max(peak, ++requestsInFlight);
+    await delay(35);
+    requestsInFlight -= 1;
+    return {
+      status: 'readable',
+      text: '工商业发展',
+      points: [
+        { id: '1', score: 2, evidence: '工商业发展', reason: '写出经济原因' },
+      ],
+      comment: '补充经济发展如何产生影响。',
+    };
   });
-  const grading = await modelServer({
-    points: [
-      { id: '1', score: 2, evidence: '工商业发展', reason: '写出经济原因' },
-    ],
-    comment: '补充经济发展如何产生影响。',
-  });
+  const legacy = await modelServer({});
   shared.database = new DatabaseSync(':memory:');
   shared.database.exec(`
     CREATE TABLE projects (id TEXT PRIMARY KEY);
@@ -117,13 +124,13 @@ it('reuses OCR during rubric revision and exports the teacher-confirmed formal b
       listProjectPapers: async () => papers,
     } as unknown as ProjectService);
     await service.saveDefaultProvider('recognition', {
-      baseUrl: recognition.baseUrl,
+      baseUrl: vision.baseUrl,
       model: 'vision',
       apiKey: 'fake',
     });
-    expect((await service.getDefaultProviders()).grading.hasKey).toBe(false);
+    expect((await service.getDefaultProviders()).grading.model).toBe('vision');
     await service.saveDefaultProvider('grading', {
-      baseUrl: grading.baseUrl,
+      baseUrl: legacy.baseUrl,
       model: 'text',
       apiKey: 'fake',
     });
@@ -150,7 +157,7 @@ it('reuses OCR during rubric revision and exports the teacher-confirmed formal b
     };
     await service.saveDraft('p', 0, draft);
     await expect(service.start('p', 'formal')).rejects.toThrow('教师试阅');
-    await service.start('p', 'trial', 1);
+    await service.start('p', 'trial', 1, false, 2);
     const trial = async () => {
       await vi.waitFor(async () =>
         expect((await service.get('p')).trial?.status).toBe('review'),
@@ -158,6 +165,9 @@ it('reuses OCR during rubric revision and exports the teacher-confirmed formal b
       return (await service.get('p')).trial!;
     };
     const first = await trial();
+    expect(peak).toBe(2);
+    expect(first.concurrency).toBe(2);
+    expect(vision.requests).toHaveLength(2);
     expect(first.rows[0]).toMatchObject({
       status: 'scored',
       transcript: '工商业发展',
@@ -207,11 +217,8 @@ it('reuses OCR during rubric revision and exports the teacher-confirmed formal b
       detail.getCell('H2').value,
     ]).toEqual(['2026001', 1, '请补充具体史实。']);
     expect(workbook.getWorksheet('学生总分')?.getCell('D2').value).toBe(3);
-    expect(recognition.requests).toHaveLength(2);
-    expect(JSON.stringify(recognition.requests)).toContain(
-      'data:image/png;base64,',
-    );
-    expect(grading.requests).toHaveLength(5);
+    expect(JSON.stringify(vision.requests)).toContain('data:image/png;base64,');
+    expect(vision.requests).toHaveLength(5);
     draft.regionsByPaper = {
       p001: {
         '17(1)': [{ page: 0, x: 0.1, y: 0.55, width: 0.5, height: 0.4 }],
@@ -223,76 +230,75 @@ it('reuses OCR during rubric revision and exports the teacher-confirmed formal b
     expect(changed.rows[0].sources[0].region.y).toBe(0.55);
     expect(changed.rows[1].sources[0].region.y).toBe(0.5);
     expect(changed.rows[1].audit?.score).toBe(2);
-    expect(recognition.requests).toHaveLength(3);
-    expect(grading.requests).toHaveLength(6);
+    expect(vision.requests).toHaveLength(6);
     await service.start('p', 'trial', 1, true);
     await trial();
-    expect(recognition.requests).toHaveLength(3);
-    expect(grading.requests).toHaveLength(6);
+    expect(vision.requests).toHaveLength(6);
+    expect(legacy.requests).toHaveLength(0);
     expect(
-      grading.requests.every(
+      vision.requests.every(
         (request) =>
-          request.model === 'text' &&
-          typeof request.messages[1].content === 'string',
+          request.model === 'vision' &&
+          Array.isArray(request.messages[1].content),
       ),
     ).toBe(true);
   } finally {
     shared.database.close();
-    recognition.close();
-    grading.close();
+    vision.close();
+    legacy.close();
     await rm(dir, { recursive: true, force: true });
   }
 });
 
 it('prepares an exam from mixed material and grades its 2B row locally', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'neuromark-exam-'));
-  const recognition = await modelServer((req) =>
-    String(req.messages[0].content).includes('印刷的小题')
-      ? {
-          items: [
-            { id: '1', kind: 'choice', page: 1 },
-            { id: '37（1）', kind: 'written', page: 1 },
-          ],
-        }
-      : { status: 'readable', text: '维护清政府统治' },
-  );
-  const grading = await modelServer((req) =>
-    String(req.messages[0].content).startsWith('把教师')
-      ? {
-          message: '已整理',
-          issues: [],
-          items: [
-            {
-              id: '1',
-              prompt: '单选',
-              maxScore: 2,
-              reference: '答案 B',
-              source: '答案原文：1.B',
-              criteria: [],
-              answerKey: 'B',
-            },
-            {
-              id: '37(1)',
-              prompt: '说明目的',
-              maxScore: 2,
-              reference: '维护清政府统治',
-              source: '给分说明',
-              criteria: [{ id: '1', text: '指出维护清政府统治', maxScore: 2 }],
-            },
-          ],
-        }
-      : {
-          points: [
-            {
-              id: '1',
-              score: 2,
-              evidence: '维护清政府统治',
-              reason: '表述明确',
-            },
-          ],
-          comment: '命中目的。',
+  const vision = await modelServer((req) => {
+    const system = String(req.messages[0].content);
+    if (system.includes('印刷的小题'))
+      return {
+        items: [
+          { id: '1', kind: 'choice', page: 1 },
+          { id: '37（1）', kind: 'written', page: 1 },
+        ],
+      };
+    if (system.startsWith('把教师'))
+      return {
+        message: '已整理',
+        issues: [],
+        items: [
+          {
+            id: '1',
+            prompt: '单选',
+            maxScore: 2,
+            reference: '答案 B',
+            source: '答案原文：1.B',
+            criteria: [],
+            answerKey: 'B',
+          },
+          {
+            id: '37(1)',
+            prompt: '说明目的',
+            maxScore: 2,
+            reference: '维护清政府统治',
+            source: '给分说明',
+            criteria: [{ id: '1', text: '指出维护清政府统治', maxScore: 2 }],
+          },
+        ],
+      };
+    return {
+      status: 'readable',
+      text: '维护清政府统治',
+      points: [
+        {
+          id: '1',
+          score: 2,
+          evidence: '维护清政府统治',
+          reason: '表述明确',
         },
-  );
+      ],
+      comment: '命中目的。',
+    };
+  });
   shared.database = new DatabaseSync(':memory:');
   shared.database.exec(`
     CREATE TABLE projects (id TEXT PRIMARY KEY);
@@ -328,13 +334,8 @@ it('prepares an exam from mixed material and grades its 2B row locally', async (
       listProjectPapers: async () => papers,
     } as unknown as ProjectService);
     await service.saveDefaultProvider('recognition', {
-      baseUrl: recognition.baseUrl,
+      baseUrl: vision.baseUrl,
       model: 'vision',
-      apiKey: 'fake',
-    });
-    await service.saveDefaultProvider('grading', {
-      baseUrl: grading.baseUrl,
-      model: 'grading',
       apiKey: 'fake',
     });
     const items = await service.discoverCatalog('exam', 'p1', 0);
@@ -383,13 +384,13 @@ it('prepares an exam from mixed material and grades its 2B row locally', async (
       transcript: '维护清政府统治',
       grade: { score: 2 },
     });
-    expect(recognition.requests).toHaveLength(2);
-    expect(grading.requests).toHaveLength(2);
-    expect(JSON.stringify(grading.requests)).not.toContain('image_url');
+    expect(vision.requests).toHaveLength(3);
+    expect(
+      vision.requests.map(({ messages }) => Array.isArray(messages[1].content)),
+    ).toEqual([true, false, true]);
   } finally {
     shared.database.close();
-    recognition.close();
-    grading.close();
+    vision.close();
     await rm(dir, { recursive: true, force: true });
   }
 });

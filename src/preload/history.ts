@@ -1,3 +1,6 @@
+export const DEFAULT_HISTORY_CONCURRENCY = 3;
+export const MAX_HISTORY_CONCURRENCY = 6;
+
 export interface HistoryRegion {
   page: number;
   x: number;
@@ -151,6 +154,8 @@ export interface HistoryRun {
   revision: number;
   providerRevision: number;
   providerSignature?: string;
+  scoringMode?: 'image';
+  concurrency?: number;
   providers: HistoryProviderSettings;
   draft: HistoryDraft;
   sampledPapers: number;
@@ -247,6 +252,7 @@ export interface HistoryApi {
     kind: HistoryRun['kind'],
     sampleSize?: number,
     repeat?: boolean,
+    concurrency?: number,
   ) => Promise<void>;
   resume: (projectId: string, runId: string) => Promise<void>;
   preview: (projectId: string, ref: HistoryRowRef) => Promise<string[]>;

@@ -12,6 +12,10 @@ import {
   useMessage,
 } from 'naive-ui';
 import type { PaperRecord } from '@preload/contracts';
+import {
+  DEFAULT_HISTORY_CONCURRENCY,
+  MAX_HISTORY_CONCURRENCY,
+} from '@preload/history';
 import type {
   HistoryDraft,
   HistoryRowRef,
@@ -38,6 +42,7 @@ const snapshot = ref<HistorySnapshot>();
 const draft = ref<HistoryDraft>({ reference: '', material: '', questions: [] });
 const draftRevision = ref(0);
 const sampleSize = ref<number | null>(10);
+const concurrency = ref<number | null>(DEFAULT_HISTORY_CONCURRENCY);
 type View = 'catalog' | 'regions' | 'rubric' | 'trial' | 'formal' | 'archive';
 const view = ref<View>('catalog');
 const regionView = ref<'written' | 'choice'>('written');
@@ -70,7 +75,6 @@ const rubricBusy = ref(false);
 const loadingError = ref('');
 let timer: ReturnType<typeof setInterval> | undefined;
 let refreshId = 0;
-const roles = ['recognition', 'grading'] as const;
 const running = computed(
   () =>
     snapshot.value?.trial?.status === 'running' ||
@@ -83,7 +87,7 @@ const draftReady = computed(
   () => !dirty.value && snapshot.value?.draft.phase === 'ready',
 );
 const configured = computed(() =>
-  roles.every((role) => snapshot.value?.providers[role].hasKey),
+  Boolean(snapshot.value?.providers.recognition.hasKey),
 );
 const activeRun = computed(() =>
   view.value === 'trial'
@@ -107,6 +111,10 @@ async function refresh(reloadDraft = false) {
     const current = await api.get(props.projectId);
     if (requestId !== refreshId) return;
     if (!snapshot.value) {
+      concurrency.value =
+        current.formal?.concurrency ??
+        current.trial?.concurrency ??
+        DEFAULT_HISTORY_CONCURRENCY;
       switch (current.draft.phase) {
         case 'regions':
           view.value = 'regions';
@@ -154,7 +162,13 @@ async function act(
 
 async function start(kind: 'trial' | 'formal', repeat = false) {
   await act(async () => {
-    await api.start(props.projectId, kind, sampleSize.value ?? 10, repeat);
+    await api.start(
+      props.projectId,
+      kind,
+      sampleSize.value ?? 10,
+      repeat,
+      concurrency.value ?? DEFAULT_HISTORY_CONCURRENCY,
+    );
     view.value = kind;
   });
 }
@@ -241,18 +255,10 @@ onBeforeUnmount(() => {
       </n-space>
       <n-space align="center">
         <span
-          >OCR ·
+          >视觉阅卷 ·
           {{
             snapshot.providers.recognition.hasKey
               ? snapshot.providers.recognition.model
-              : '待配置'
-          }}</span
-        >
-        <span
-          >评分 ·
-          {{
-            snapshot.providers.grading.hasKey
-              ? snapshot.providers.grading.model
               : '待配置'
           }}</span
         >
@@ -267,7 +273,7 @@ onBeforeUnmount(() => {
           @click="
             act(
               () => api.adoptProviders(projectId),
-              '已将未配置的模型迁移到全局设置',
+              '已将项目模型迁移到全局设置',
             )
           "
           >迁移项目中已保存的模型</n-button
@@ -362,6 +368,19 @@ onBeforeUnmount(() => {
           }}{{ dirty ? ' · 有未保存修改' : '' }}</span
         >
       </n-space>
+      <n-space v-if="view === 'trial' || view === 'formal'" align="center">
+        <label>
+          视觉评分并发
+          <n-input-number
+            v-model:value="concurrency"
+            :min="1"
+            :max="MAX_HISTORY_CONCURRENCY"
+            :precision="0"
+            :disabled="busy || running"
+          />
+        </label>
+        <span>默认同时处理 3 个小题，接口限流时可降低。</span>
+      </n-space>
       <n-card v-if="view === 'trial'" size="small" title="试阅">
         <n-space align="center">
           <label
@@ -391,6 +410,7 @@ onBeforeUnmount(() => {
               running ||
               !draftReady ||
               snapshot.trial?.status !== 'review' ||
+              snapshot.trial.scoringMode !== 'image' ||
               snapshot.trial.revision !== snapshot.revision
             "
             @click="approveTrial"
@@ -467,6 +487,12 @@ onBeforeUnmount(() => {
       </n-card>
 
       <template v-if="activeRun">
+        <n-alert
+          v-if="!activeRun.scoringMode && view !== 'archive'"
+          type="info"
+        >
+          这是旧版分两步处理的批次。请开始新一轮视觉试阅，再进入新版正式阅卷。
+        </n-alert>
         <n-space align="center">
           <n-tag size="small">{{ statusLabel[activeRun.status] }}</n-tag>
           <span
@@ -481,6 +507,7 @@ onBeforeUnmount(() => {
           <n-button
             v-if="
               view !== 'archive' &&
+              activeRun.scoringMode === 'image' &&
               activeRun.status !== 'running' &&
               activeRun.status !== 'confirmed' &&
               activeRun.rows.some(
