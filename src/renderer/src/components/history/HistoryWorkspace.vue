@@ -18,9 +18,11 @@ import type {
   HistoryRun,
   HistorySnapshot,
 } from '@preload/history';
-import HistorySetup from './HistorySetup.vue';
+import HistoryCatalog from './HistoryCatalog.vue';
 import HistoryReview from './HistoryReview.vue';
 import HistoryRegions from './HistoryRegions.vue';
+import ChoiceGridEditor from './ChoiceGridEditor.vue';
+import RubricWorkbench from './RubricWorkbench.vue';
 import { useRouter } from 'vue-router';
 
 const props = defineProps<{
@@ -28,6 +30,7 @@ const props = defineProps<{
   papers: PaperRecord[];
   referenceAnswer: string;
 }>();
+const emit = defineEmits<{ papersChanged: [] }>();
 const message = useMessage();
 const router = useRouter();
 const api = window.neuromark.history;
@@ -35,7 +38,27 @@ const snapshot = ref<HistorySnapshot>();
 const draft = ref<HistoryDraft>({ reference: '', material: '', questions: [] });
 const draftRevision = ref(0);
 const sampleSize = ref<number | null>(10);
-const view = ref<'setup' | 'regions' | 'trial' | 'formal' | 'archive'>('setup');
+type View = 'catalog' | 'regions' | 'rubric' | 'trial' | 'formal' | 'archive';
+const view = ref<View>('catalog');
+const regionView = ref<'written' | 'choice'>('written');
+const hasChoice = computed(() =>
+  draft.value.questions.some((item) => item.kind === 'choice'),
+);
+const hasWritten = computed(() =>
+  draft.value.questions.some((item) => item.kind !== 'choice'),
+);
+const steps = [
+  { id: 'catalog', title: '上传与识别' },
+  { id: 'regions', title: '切割答题卡' },
+  { id: 'rubric', title: '材料与细则' },
+  { id: 'trial', title: '试阅抽检' },
+  { id: 'formal', title: '正式阅卷' },
+] as const;
+const unlocked = computed(() => {
+  const phase = snapshot.value?.draft.phase ?? 'catalog';
+  if (phase === 'ready') return snapshot.value?.approvedTrialId ? 4 : 3;
+  return ['catalog', 'regions', 'rubric'].indexOf(phase);
+});
 const archived = ref<HistoryRun>();
 const busy = ref(false);
 const loadingError = ref('');
@@ -51,7 +74,7 @@ const dirty = computed(
   () => JSON.stringify(draft.value) !== JSON.stringify(snapshot.value?.draft),
 );
 const draftReady = computed(
-  () => !dirty.value && Boolean(snapshot.value?.revision),
+  () => !dirty.value && snapshot.value?.draft.phase === 'ready',
 );
 const configured = computed(() =>
   roles.every((role) => snapshot.value?.providers[role].hasKey),
@@ -77,6 +100,19 @@ async function refresh(reloadDraft = false) {
   try {
     const current = await api.get(props.projectId);
     if (requestId !== refreshId) return;
+    if (!snapshot.value) {
+      switch (current.draft.phase) {
+        case 'regions':
+          view.value = 'regions';
+          break;
+        case 'rubric':
+          view.value = 'rubric';
+          break;
+        case 'ready':
+          view.value = current.approvedTrialId ? 'formal' : 'trial';
+          break;
+      }
+    }
     if (!snapshot.value || reloadDraft) {
       draft.value = structuredClone(current.draft);
       draftRevision.value = current.revision;
@@ -115,6 +151,30 @@ async function start(kind: 'trial' | 'formal', repeat = false) {
     await api.start(props.projectId, kind, sampleSize.value ?? 10, repeat);
     view.value = kind;
   });
+}
+
+function savePhase(next: HistoryDraft, step: View, success: string) {
+  return act(
+    async () => {
+      await api.saveDraft(
+        props.projectId,
+        draftRevision.value,
+        serialized(next),
+      );
+      view.value = step;
+    },
+    success,
+    true,
+  );
+}
+
+function approveTrial() {
+  const trial = snapshot.value?.trial;
+  if (!trial) return;
+  void act(async () => {
+    await api.approveTrial(props.projectId, trial.id);
+    view.value = 'formal';
+  }, '试阅已确认');
 }
 
 async function exportRun(run: HistoryRun) {
@@ -159,24 +219,12 @@ onBeforeUnmount(() => {
     <template v-if="snapshot">
       <n-space align="center">
         <n-button
-          :type="view === 'setup' ? 'primary' : 'default'"
-          @click="view = 'setup'"
-          >准备与细则</n-button
-        >
-        <n-button
-          :type="view === 'regions' ? 'primary' : 'default'"
-          @click="view = 'regions'"
-          >答题区域</n-button
-        >
-        <n-button
-          :type="view === 'trial' ? 'primary' : 'default'"
-          @click="view = 'trial'"
-          >试阅与抽检</n-button
-        >
-        <n-button
-          :type="view === 'formal' ? 'primary' : 'default'"
-          @click="view = 'formal'"
-          >正式批阅</n-button
+          v-for="(step, index) in steps"
+          :key="step.id"
+          :type="view === step.id ? 'primary' : 'default'"
+          :disabled="busy || index > unlocked"
+          @click="view = step.id"
+          >{{ index + 1 }}. {{ step.title }}</n-button
         >
         <n-button
           :type="view === 'archive' ? 'primary' : 'default'"
@@ -218,47 +266,81 @@ onBeforeUnmount(() => {
           >迁移项目中已保存的模型</n-button
         >
       </n-space>
-      <template v-if="view === 'setup'">
-        <HistorySetup
-          v-model="draft"
-          :reference-answer="referenceAnswer"
-          :disabled="busy || running"
-        />
-      </template>
-      <HistoryRegions
-        v-if="view === 'regions'"
+      <HistoryCatalog
+        v-if="view === 'catalog'"
         v-model="draft"
         :project-id="projectId"
         :papers="papers"
         :disabled="busy || running"
+        :has-recognition="snapshot.providers.recognition.hasKey"
+        @papers-changed="emit('papersChanged')"
+        @confirmed="(next) => savePhase(next, 'regions', '题号已确认')"
       />
-      <n-space v-if="view === 'setup' || view === 'regions'" align="center">
+      <template v-if="view === 'regions'">
+        <n-space v-if="hasChoice && hasWritten">
+          <n-button
+            :type="regionView === 'written' ? 'primary' : 'default'"
+            @click="regionView = 'written'"
+            >主观题切框</n-button
+          >
+          <n-button
+            :type="regionView === 'choice' ? 'primary' : 'default'"
+            @click="regionView = 'choice'"
+            >选择题填涂区</n-button
+          >
+        </n-space>
+        <HistoryRegions
+          v-if="hasWritten && (regionView === 'written' || !hasChoice)"
+          v-model="draft"
+          :project-id="projectId"
+          :papers="papers"
+          :disabled="busy || running"
+        />
+        <ChoiceGridEditor
+          v-if="hasChoice && (regionView === 'choice' || !hasWritten)"
+          v-model="draft"
+          :papers="papers"
+          :disabled="busy || running"
+        />
         <n-button
           type="primary"
+          :disabled="busy || running"
+          @click="
+            savePhase({ ...draft, phase: 'rubric' }, 'rubric', '答题区域已确认')
+          "
+          >确认切题，进入材料与细则</n-button
+        >
+      </template>
+      <RubricWorkbench
+        v-if="view === 'rubric'"
+        v-model="draft"
+        :project-id="projectId"
+        :reference-answer="referenceAnswer"
+        :disabled="busy || running"
+        @save="
+          savePhase({ ...draft, phase: 'rubric' }, 'rubric', '评分草稿已保存')
+        "
+        @confirm="
+          savePhase({ ...draft, phase: 'ready' }, 'trial', '评分细则已确认')
+        "
+      />
+      <n-space v-if="view === 'regions' || view === 'rubric'" align="center">
+        <n-button
           :disabled="busy || running || !dirty"
           @click="
-            act(
-              () => api.saveDraft(projectId, draftRevision, serialized(draft)),
-              '细则与答题区域已保存',
-              true,
+            savePhase(
+              { ...draft, phase: view === 'regions' ? 'regions' : 'rubric' },
+              view,
+              '草稿已保存',
             )
           "
+          >保存草稿</n-button
         >
-          保存细则与题框
-        </n-button>
         <span
           >版本 {{ snapshot.revision
           }}{{ dirty ? ' · 有未保存修改' : '' }}</span
         >
-        <n-button
-          v-if="draftRevision !== snapshot.revision"
-          text
-          :disabled="busy"
-          @click="refresh(true)"
-          >载入最新版</n-button
-        >
       </n-space>
-
       <n-card v-if="view === 'trial'" size="small" title="试阅">
         <n-space align="center">
           <label
@@ -290,13 +372,7 @@ onBeforeUnmount(() => {
               snapshot.trial?.status !== 'review' ||
               snapshot.trial.revision !== snapshot.revision
             "
-            @click="
-              snapshot.trial &&
-              act(
-                () => api.approveTrial(projectId, snapshot!.trial!.id),
-                '已确认试阅，可开始正式批阅',
-              )
-            "
+            @click="approveTrial"
             >确认试阅通过</n-button
           >
           <n-tag v-if="snapshot.approvedTrialId" type="success" size="small"
@@ -369,7 +445,7 @@ onBeforeUnmount(() => {
         >
       </n-card>
 
-      <template v-if="view !== 'setup' && activeRun">
+      <template v-if="activeRun">
         <n-space align="center">
           <n-tag size="small">{{ statusLabel[activeRun.status] }}</n-tag>
           <span

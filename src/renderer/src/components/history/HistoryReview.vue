@@ -208,7 +208,11 @@ watch(
           <n-space vertical>
             <div class="prompt">{{ question.prompt }}</div>
             <label
-              >学生作答转录
+              >{{
+                question.kind === 'choice'
+                  ? '识别选项（A–D，空白留空）'
+                  : '学生作答转录'
+              }}
               <n-input
                 v-model:value="transcript"
                 type="textarea"
@@ -220,13 +224,23 @@ watch(
               v-if="editable"
               size="small"
               :disabled="
-                busy || transcript.trim() === (current.transcript ?? '')
+                busy ||
+                (transcript.trim() === (current.transcript ?? '') &&
+                  !(
+                    question.kind === 'choice' &&
+                    current.status === 'unreadable'
+                  ))
               "
               @click="emit('correct', reference, transcript)"
-              >保存更正并重评</n-button
+              >{{
+                question.kind === 'choice' ? '确认选项并重算' : '保存更正并重评'
+              }}</n-button
             >
             <div v-if="current.grade || current.status === 'blank'">
-              <strong>AI 建议分</strong> {{ current.grade?.score ?? 0 }} /
+              <strong>{{
+                question.kind === 'choice' ? '按答案键计分' : 'AI 建议分'
+              }}</strong>
+              {{ current.grade?.score ?? 0 }} /
               {{ question.maxScore }}
             </div>
             <ul v-if="current.grade" class="points">

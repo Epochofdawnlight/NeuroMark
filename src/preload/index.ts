@@ -9,6 +9,12 @@ import type {
 
 const api: NeuromarkApi = {
   history: {
+    discoverCatalog: (...args) =>
+      ipcRenderer.invoke('history:discover-catalog', ...args),
+    readExamMaterials: (...args) =>
+      ipcRenderer.invoke('history:read-exam-materials', ...args),
+    proposeRubric: (...args) =>
+      ipcRenderer.invoke('history:propose-rubric', ...args),
     getDefaultProviders: () =>
       ipcRenderer.invoke('history:get-default-providers'),
     saveDefaultProvider: (...args) =>

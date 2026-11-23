@@ -14,17 +14,60 @@ export interface HistoryCriterion {
 
 export interface HistoryQuestion {
   id: string;
+  kind?: 'written' | 'choice';
   prompt: string;
   maxScore: number;
   regions: HistoryRegion[];
   criteria: HistoryCriterion[];
+  answerKey?: ChoiceOption;
+  reference?: string;
+  source?: string;
+}
+
+export type ChoiceOption = 'A' | 'B' | 'C' | 'D';
+export interface ChoiceGrid {
+  id: string;
+  region: HistoryRegion;
+  questionIds: string[];
+  orientation: 'rows' | 'columns';
+}
+export interface OpticalMark {
+  status: 'single' | 'blank' | 'multiple' | 'uncertain';
+  selected?: ChoiceOption;
+  marks: number[];
+}
+export interface ExamCatalogItem {
+  id: string;
+  kind: 'written' | 'choice';
+  page?: number;
+}
+export interface ExamRubricItem {
+  id: string;
+  prompt: string;
+  maxScore: number;
+  reference: string;
+  source: string;
+  criteria: HistoryCriterion[];
+  answerKey?: ChoiceOption;
+}
+export interface ExamRubricProposal {
+  message: string;
+  issues: string[];
+  items: ExamRubricItem[];
+}
+export interface ExamMaterialFile {
+  name: string;
+  data: Uint8Array;
 }
 
 export interface HistoryDraft {
+  phase?: 'catalog' | 'regions' | 'rubric' | 'ready';
   reference: string;
   material: string;
   questions: HistoryQuestion[];
   regionsByPaper?: Record<string, Record<string, HistoryRegion[]>>;
+  choiceGrids?: ChoiceGrid[];
+  rubricIssues?: string[];
 }
 
 export interface HistoryEndpoint {
@@ -77,6 +120,8 @@ export interface HistoryRow {
   cacheKey: string;
   status: 'pending' | 'scored' | 'blank' | 'unreadable' | 'error';
   transcript?: string;
+  opticalMark?: OpticalMark;
+  choiceOrientation?: ChoiceGrid['orientation'];
   grade?: HistoryGrade;
   error?: string;
   audit?: { at: string; score: number; comment: string; note: string };
@@ -141,6 +186,20 @@ export interface HistoryRowRef {
 }
 
 export interface HistoryApi {
+  discoverCatalog: (
+    projectId: string,
+    paperId: string,
+    redactTop: number,
+  ) => Promise<ExamCatalogItem[]>;
+  readExamMaterials: (
+    projectId: string,
+    files: ExamMaterialFile[],
+  ) => Promise<string>;
+  proposeRubric: (
+    projectId: string,
+    draft: HistoryDraft,
+    instruction: string,
+  ) => Promise<ExamRubricProposal>;
   getDefaultProviders: () => Promise<HistoryProviderSettings>;
   saveDefaultProvider: (
     role: HistoryProviderRole,

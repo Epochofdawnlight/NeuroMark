@@ -54,9 +54,12 @@ const page = computed(
     pages.value.find((entry) => entry.pageIndex === pageNumber.value) ??
     pages.value[0],
 );
-const question = computed(
-  () => draft.value.questions[questionIndex.value] ?? draft.value.questions[0],
-);
+const question = computed(() => {
+  const selected = draft.value.questions[questionIndex.value];
+  return selected?.kind !== 'choice' && selected
+    ? selected
+    : draft.value.questions.find((item) => item.kind !== 'choice');
+});
 
 function overrideFor(item: HistoryQuestion) {
   const id = paper.value?.id;
@@ -100,9 +103,11 @@ function useTemplate() {
 
 const boxes = computed(() =>
   draft.value.questions.flatMap((item, qIndex) =>
-    regions(item)
-      .map((region, index) => ({ item, qIndex, region, index }))
-      .filter(({ region }) => region.page === page.value?.pageIndex),
+    item.kind === 'choice'
+      ? []
+      : regions(item)
+          .map((region, index) => ({ item, qIndex, region, index }))
+          .filter(({ region }) => region.page === page.value?.pageIndex),
   ),
 );
 const overlap = computed(() =>
@@ -280,7 +285,7 @@ async function preview() {
 <template>
   <n-card size="small" title="整张答题卡标注">
     <p v-if="!paper">请先导入并扫描答题卡。</p>
-    <p v-else-if="!question">请先在「准备与细则」添加题号和评分细则。</p>
+    <p v-else-if="!question">请在第一步确认主观题题号。</p>
     <n-space v-else vertical>
       <div class="region-controls">
         <label
@@ -319,10 +324,16 @@ async function preview() {
           <n-select
             :value="draft.questions.indexOf(question)"
             :options="
-              draft.questions.map((item, index) => ({
-                label: item.id || '未填写题号',
-                value: index,
-              }))
+              draft.questions.flatMap((item, index) =>
+                item.kind === 'choice'
+                  ? []
+                  : [
+                      {
+                        label: item.id || '未填写题号',
+                        value: index,
+                      },
+                    ],
+              )
             "
             @update:value="
               (value) => {

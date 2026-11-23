@@ -18,6 +18,9 @@ export function registerHistoryIpc(projects: ProjectService): void {
     );
   }
   handle('get', 'get');
+  handle('discover-catalog', 'discoverCatalog');
+  handle('read-exam-materials', 'readExamMaterials');
+  handle('propose-rubric', 'proposeRubric');
   handle('get-default-providers', 'getDefaultProviders');
   handle('save-default-provider', 'saveDefaultProvider');
   handle('test-default-provider', 'testDefaultProvider');

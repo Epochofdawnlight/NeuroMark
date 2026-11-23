@@ -7,6 +7,8 @@ import type { ProjectService } from '@main/services/projectService';
 import type { PaperRecord } from '@preload/contracts';
 import type {
   HistoryDraft,
+  ExamMaterialFile,
+  OpticalMark,
   HistoryEndpoint,
   HistoryEndpointInput,
   HistoryProviderInput,
@@ -32,6 +34,16 @@ import {
   type HistoryConnection,
   type HistoryTranscript,
 } from './historyModels';
+import {
+  detectExamCatalog,
+  extractExamMaterials,
+  organizeExamRubric,
+} from './examPreparation';
+import {
+  choiceOptions,
+  gradeOpticalMark,
+  readOpticalMarks,
+} from './opticalMarks';
 
 type Role = keyof HistoryProviderSettings;
 type StoredEndpoint = Omit<HistoryEndpoint, 'hasKey'> & {
@@ -185,13 +197,24 @@ function buildRows(papers: PaperRecord[], draft: HistoryDraft): HistoryRow[] {
     draft.questions.map((question) => {
       const regions = regionsForQuestion(draft, paper.id, question);
       const sources = sourcesForRegions(paper, regions);
+      const choiceOrientation =
+        question.kind === 'choice'
+          ? draft.choiceGrids?.find((grid) =>
+              grid.questionIds.includes(question.id),
+            )?.orientation
+          : undefined;
       const missing = !regions.length || sources.length !== regions.length;
       return {
         paperId: paper.id,
         paperCode: paper.paperCode,
         questionId: question.id,
         sources,
-        cacheKey: JSON.stringify([paper.id, question.id, sources]),
+        cacheKey: JSON.stringify(
+          choiceOrientation
+            ? [paper.id, question.id, sources, choiceOrientation]
+            : [paper.id, question.id, sources],
+        ),
+        choiceOrientation,
         status: missing ? 'error' : 'pending',
         error: !regions.length
           ? '这道小题还没有作答区域。请在答题区域工作台补画。'
@@ -237,7 +260,8 @@ function reuseTrialRows(
 ): HistoryRow[] {
   if (
     draft.reference !== prior.draft.reference ||
-    draft.material !== prior.draft.material
+    ((!draft.phase || !prior.draft.phase) &&
+      draft.material !== prior.draft.material)
   )
     return rows;
   const unchanged = new Set(
@@ -248,6 +272,9 @@ function reuseTrialRows(
         );
         return (
           previous &&
+          question.kind === previous.kind &&
+          question.answerKey === previous.answerKey &&
+          question.reference === previous.reference &&
           question.prompt === previous.prompt &&
           question.maxScore === previous.maxScore &&
           JSON.stringify(question.criteria) ===
@@ -353,6 +380,61 @@ export class HistoryService {
     if (!regions.length || sources.length !== regions.length)
       throw new Error('请添加题框并检查所需页是否已扫描。');
     return Promise.all(sources.map(cropHistorySource));
+  }
+
+  async discoverCatalog(projectId: string, paperId: string, redactTop: number) {
+    const paper = (await this.projects.listProjectPapers(projectId)).find(
+      (entry) => entry.id === paperId,
+    );
+    if (!paper) throw new Error('找不到样卡。');
+    if (!Number.isFinite(redactTop) || redactTop < 0 || redactTop > 0.5)
+      throw new Error('顶部遮挡应在 0% 到 50% 之间。');
+    const pages = paper.originalPages;
+    if (!pages.length || pages.some((page) => !page.scannedPath))
+      throw new Error('请先矫正样卡的所有页面。');
+    const config = connectionFor(
+      this.effectiveProviders(this.load(projectId)).recognition,
+    );
+    const images = await Promise.all(
+      pages.map((page) =>
+        cropHistorySource({
+          file: page.scannedPath!,
+          version: page.scannedVersion ?? null,
+          region: {
+            page: page.pageIndex,
+            x: 0,
+            y: redactTop,
+            width: 1,
+            height: 1 - redactTop,
+          },
+        }),
+      ),
+    );
+    return detectExamCatalog(config, images);
+  }
+
+  async readExamMaterials(projectId: string, files: ExamMaterialFile[]) {
+    await this.projects.getProjectById(projectId);
+    return extractExamMaterials(files, () =>
+      connectionFor(this.effectiveProviders(this.load(projectId)).recognition),
+    );
+  }
+
+  async proposeRubric(
+    projectId: string,
+    input: HistoryDraft,
+    instruction: string,
+  ) {
+    await this.projects.getProjectById(projectId);
+    const draft = validateHistoryDraft(input);
+    if (!draft.questions.length) throw new Error('请先确认题号。');
+    if (!draft.material.trim() && !draft.reference.trim())
+      throw new Error('请先输入试卷、答案或评分说明。');
+    return organizeExamRubric(
+      connectionFor(this.effectiveProviders(this.load(projectId)).grading),
+      draft,
+      instruction.trim(),
+    );
   }
 
   private load(projectId: string): Workspace {
@@ -512,7 +594,7 @@ export class HistoryService {
     try {
       const papers = await this.projects.listProjectPapers(projectId);
       const state = this.load(projectId);
-      const draft = validateHistoryDraft(state.draft);
+      const draft = validateHistoryDraft(state.draft, true);
       const providers = this.effectiveProviders(state);
       const connections = this.connections(providers);
       if (!papers.length) throw new Error('项目中没有答卷。');
@@ -618,6 +700,18 @@ export class HistoryService {
       for (const row of run.rows) {
         if (row.status !== 'pending') continue;
         try {
+          if (row.choiceOrientation) {
+            const manual = state.transcriptions[row.cacheKey];
+            const mark = manual
+              ? this.manualMark(manual.text)
+              : await readOpticalMarks(
+                  await cropHistorySource(row.sources[0]),
+                  row.choiceOrientation,
+                );
+            this.gradeChoiceRow(row, mark, run);
+            this.write(projectId, state);
+            continue;
+          }
           const autoKey = JSON.stringify([
             run.providers.recognition.baseUrl,
             run.providers.recognition.model,
@@ -672,6 +766,37 @@ export class HistoryService {
     row.status = 'scored';
   }
 
+  private manualMark(text: string): OpticalMark {
+    const option = choiceOptions.find(
+      (item) => item === text.trim().toUpperCase(),
+    );
+    if (option) return { status: 'single', selected: option, marks: [] };
+    if (!text.trim()) return { status: 'blank', marks: [] };
+    throw new Error('人工确认的选择题选项必须为 A、B、C、D，空白请留空。');
+  }
+
+  private gradeChoiceRow(row: HistoryRow, mark: OpticalMark, run: HistoryRun) {
+    const question = run.draft.questions.find(
+      (item) => item.id === row.questionId,
+    )!;
+    row.opticalMark = mark;
+    row.transcript = mark.selected ?? '';
+    row.grade = gradeOpticalMark(question, mark);
+    row.audit = undefined;
+    row.status =
+      mark.status === 'single'
+        ? 'scored'
+        : mark.status === 'blank'
+          ? 'blank'
+          : 'unreadable';
+    row.error =
+      mark.status === 'multiple'
+        ? '识别到多选，请依据原图复核。'
+        : mark.status === 'uncertain'
+          ? '填涂偏浅或有擦改，请依据原图复核。'
+          : undefined;
+  }
+
   async preview(projectId: string, ref: HistoryRowRef): Promise<string[]> {
     await this.projects.getProjectById(projectId);
     const row = findRow(findRun(this.load(projectId), ref.runId), ref);
@@ -704,8 +829,8 @@ export class HistoryService {
     if (!row.sources.length || row.sources.length !== regionCount(run, row)) {
       throw new Error('存在缺失页，无法确认转录。请先修复扫描件。');
     }
-    const grading = connectionFor(providers.grading);
     const value = text.trim();
+    const choice = row.choiceOrientation ? this.manualMark(value) : undefined;
     const transcript: HistoryTranscript = value
       ? { status: 'readable', text: value }
       : { status: 'blank', text: '' };
@@ -721,7 +846,14 @@ export class HistoryService {
       state.transcriptions[row.cacheKey] = transcript;
       if (run.kind === 'trial') state.approvedTrialId = undefined;
       try {
-        await this.gradeRow(row, transcript, run, grading);
+        if (choice) this.gradeChoiceRow(row, choice, run);
+        else
+          await this.gradeRow(
+            row,
+            transcript,
+            run,
+            connectionFor(providers.grading),
+          );
       } catch (error) {
         row.status = 'error';
         row.error = error instanceof Error ? error.message : '重新评分失败。';

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { choiceRegion } from './opticalMarks';
 import type {
   HistoryDraft,
   HistoryGrade,
@@ -21,21 +22,37 @@ const regionSchema = z
 export const historyRegionsSchema = z.array(regionSchema).max(100);
 
 const draftSchema = z.object({
+  phase: z.enum(['catalog', 'regions', 'rubric', 'ready']).optional(),
   reference: z.string().trim(),
   material: z.string().trim(),
+  rubricIssues: z.array(z.string()).optional(),
   regionsByPaper: z
     .record(z.string(), z.record(z.string(), historyRegionsSchema))
+    .optional(),
+  choiceGrids: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        region: regionSchema,
+        questionIds: z.array(z.string().min(1)).min(1),
+        orientation: z.enum(['rows', 'columns']),
+      }),
+    )
     .optional(),
   questions: z.array(
     z.object({
       id: z.string().trim().min(1),
-      prompt: z.string().trim().min(1),
-      maxScore: z.number().positive(),
+      kind: z.enum(['written', 'choice']).optional(),
+      prompt: z.string().trim(),
+      maxScore: z.number().min(0),
+      answerKey: z.enum(['A', 'B', 'C', 'D']).optional(),
+      reference: z.string().trim().optional(),
+      source: z.string().trim().optional(),
       regions: historyRegionsSchema,
       criteria: z.array(
         z.object({
           id: z.string().trim().min(1),
-          text: z.string().trim().min(1),
+          text: z.string().trim(),
           maxScore: z.number().positive(),
         }),
       ),
@@ -55,14 +72,27 @@ const gradeSchema = z.object({
   comment: z.string().trim().min(1),
 });
 
-export function validateHistoryDraft(input: HistoryDraft): HistoryDraft {
+export function validateHistoryDraft(
+  input: HistoryDraft,
+  requireReady = false,
+): HistoryDraft {
   const draft = draftSchema.parse(input);
+  const ready = draft.phase === undefined || draft.phase === 'ready';
+  if (requireReady && !ready) throw new Error('请先确认评分细则，再开始试阅。');
+  if (draft.phase === 'catalog' && !draft.questions.length) return draft;
   if (!draft.questions.length) throw new Error('请添加至少一道小题。');
   const ids = new Set(draft.questions.map((q) => q.id));
   if (ids.size !== draft.questions.length)
     throw new Error('小题题号必须唯一。');
-  for (const q of draft.questions) {
-    if (!q.criteria.length) {
+  for (const q of ready ? draft.questions : []) {
+    if (!q.maxScore || (!q.prompt && q.kind !== 'choice')) {
+      throw new Error(`${q.id} 请核对题干和满分。`);
+    }
+    if (q.kind === 'choice') {
+      if (!q.answerKey) throw new Error(`${q.id} 缺少确认的 A–D 答案键。`);
+      continue;
+    }
+    if (!q.criteria.length || q.criteria.some((criterion) => !criterion.text)) {
       throw new Error(`${q.id} 需要至少一条评分细则。`);
     }
     const pointIds = new Set(q.criteria.map((c) => c.id));
@@ -80,6 +110,29 @@ export function validateHistoryDraft(input: HistoryDraft): HistoryDraft {
     const invalid = Object.keys(regions).find((id) => !ids.has(id));
     if (invalid) throw new Error(`答题区域引用了未定义的题号 ${invalid}。`);
   }
+  const choices = new Set(
+    draft.questions.filter((q) => q.kind === 'choice').map((q) => q.id),
+  );
+  const used = new Set<string>();
+  for (const grid of draft.choiceGrids ?? []) {
+    for (const id of grid.questionIds) {
+      if (!choices.has(id) || used.has(id))
+        throw new Error(`选择题 ${id} 必须且只能绑定到合适的填涂区一次。`);
+      used.add(id);
+    }
+  }
+  if (draft.phase === 'rubric' || draft.phase === 'ready') {
+    for (const q of draft.questions) {
+      const hasRegion =
+        q.kind === 'choice'
+          ? used.has(q.id)
+          : q.regions.length > 0 ||
+            Object.values(draft.regionsByPaper ?? {}).some(
+              (value) => value[q.id]?.length,
+            );
+      if (!hasRegion) throw new Error(`${q.id} 还没有答题区域，请先完成切题。`);
+    }
+  }
   return draft;
 }
 
@@ -88,6 +141,13 @@ export function regionsForQuestion(
   paperId: string,
   question: HistoryQuestion,
 ): HistoryRegion[] {
+  if (question.kind === 'choice') {
+    const grid = draft.choiceGrids?.find((item) =>
+      item.questionIds.includes(question.id),
+    );
+    const region = grid ? choiceRegion(grid, question.id) : undefined;
+    return region ? [region] : [];
+  }
   const byPaper = draft.regionsByPaper;
   const overrides =
     byPaper && Object.hasOwn(byPaper, paperId) ? byPaper[paperId] : undefined;
@@ -173,7 +233,10 @@ export function buildTrialReport(
       distribution: [...distribution]
         .sort(([a], [b]) => a - b)
         .map(([score, count]) => ({ score, count })),
-      points: q.criteria.map((criterion) => {
+      points: (q.kind === 'choice'
+        ? [{ id: 'choice', text: `答对 ${q.answerKey}`, maxScore: q.maxScore }]
+        : q.criteria
+      ).map((criterion) => {
         const scores = scored.map(
           (row) =>
             row.grade?.points.find((point) => point.id === criterion.id)

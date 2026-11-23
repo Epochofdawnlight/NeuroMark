@@ -3243,6 +3243,7 @@ function goBack() {
             :project-id="projectId"
             :papers="detail.originals"
             :reference-answer="detail.referenceAnswerMarkdown"
+            @papers-changed="projectsStore.loadProjectDetail(projectId)"
           />
         </n-tab-pane>
 

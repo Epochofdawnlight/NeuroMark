@@ -11,6 +11,7 @@ import { HistoryService } from '@main/services/history/historyService';
 import type { ProjectService } from '@main/services/projectService';
 import type { PaperRecord } from '@preload/contracts';
 import type { HistoryDraft } from '@preload/history';
+import { applyRubricProposal, mergeQuestionCatalog } from '@preload/examDraft';
 
 const shared = vi.hoisted(() => ({
   database: undefined as DatabaseSync | undefined,
@@ -26,19 +27,28 @@ vi.mock('electron', () => ({
   },
 }));
 
-async function modelServer(reply: object) {
-  const requests: { model: string; messages: { content: unknown }[] }[] = [];
+type ModelRequest = { model: string; messages: { content: unknown }[] };
+
+async function modelServer(
+  reply: object | ((request: ModelRequest) => object),
+) {
+  const requests: ModelRequest[] = [];
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(chunk);
-    requests.push(JSON.parse(Buffer.concat(chunks).toString()));
+    const body = JSON.parse(Buffer.concat(chunks).toString()) as ModelRequest;
+    requests.push(body);
     response.setHeader('Content-Type', 'application/json');
     response.end(
       JSON.stringify({
         choices: [
           {
             finish_reason: 'stop',
-            message: { content: JSON.stringify(reply) },
+            message: {
+              content: JSON.stringify(
+                typeof reply === 'function' ? reply(body) : reply,
+              ),
+            },
           },
         ],
       }),
@@ -225,6 +235,155 @@ it('reuses OCR during rubric revision and exports the teacher-confirmed formal b
           typeof request.messages[1].content === 'string',
       ),
     ).toBe(true);
+  } finally {
+    shared.database.close();
+    recognition.close();
+    grading.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('prepares an exam from mixed material and grades its 2B row locally', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'neuromark-exam-'));
+  const recognition = await modelServer((req) =>
+    String(req.messages[0].content).includes('印刷的小题')
+      ? {
+          items: [
+            { id: '1', kind: 'choice', page: 1 },
+            { id: '37（1）', kind: 'written', page: 1 },
+          ],
+        }
+      : { status: 'readable', text: '维护清政府统治' },
+  );
+  const grading = await modelServer((req) =>
+    String(req.messages[0].content).startsWith('把教师')
+      ? {
+          message: '已整理',
+          issues: [],
+          items: [
+            {
+              id: '1',
+              prompt: '单选',
+              maxScore: 2,
+              reference: '答案 B',
+              source: '答案原文：1.B',
+              criteria: [],
+              answerKey: 'B',
+            },
+            {
+              id: '37(1)',
+              prompt: '说明目的',
+              maxScore: 2,
+              reference: '维护清政府统治',
+              source: '给分说明',
+              criteria: [{ id: '1', text: '指出维护清政府统治', maxScore: 2 }],
+            },
+          ],
+        }
+      : {
+          points: [
+            {
+              id: '1',
+              score: 2,
+              evidence: '维护清政府统治',
+              reason: '表述明确',
+            },
+          ],
+          comment: '命中目的。',
+        },
+  );
+  shared.database = new DatabaseSync(':memory:');
+  shared.database.exec(`
+    CREATE TABLE projects (id TEXT PRIMARY KEY);
+    INSERT INTO projects VALUES ('exam');
+    CREATE TABLE history_workspaces (project_id TEXT PRIMARY KEY, state_json TEXT NOT NULL);
+    CREATE TABLE history_provider_defaults (role TEXT PRIMARY KEY, config_json TEXT NOT NULL);
+  `);
+  try {
+    const scan = path.join(dir, 'card.png');
+    const body =
+      '<svg width="200" height="200"><rect width="200" height="200" fill="white"/><rect x="63" y="16" width="25" height="20" fill="black"/></svg>';
+    await sharp(Buffer.from(body)).png().toFile(scan);
+    const papers: PaperRecord[] = [
+      {
+        id: 'p1',
+        projectId: 'exam',
+        paperCode: 'S01',
+        pageCount: 1,
+        scanStatus: 'completed',
+        gradingStatus: 'pending',
+        originalPages: [
+          {
+            pageIndex: 0,
+            originalPath: scan,
+            scannedPath: scan,
+            scannedVersion: Math.trunc((await stat(scan)).mtimeMs),
+          },
+        ],
+      },
+    ];
+    const service = new HistoryService({
+      getProjectById: async () => ({ id: 'exam' }),
+      listProjectPapers: async () => papers,
+    } as unknown as ProjectService);
+    await service.saveDefaultProvider('recognition', {
+      baseUrl: recognition.baseUrl,
+      model: 'vision',
+      apiKey: 'fake',
+    });
+    await service.saveDefaultProvider('grading', {
+      baseUrl: grading.baseUrl,
+      model: 'grading',
+      apiKey: 'fake',
+    });
+    const items = await service.discoverCatalog('exam', 'p1', 0);
+    expect(items.map((item) => item.id)).toEqual(['1', '37(1)']);
+    const draft = mergeQuestionCatalog(
+      { questions: [], reference: '', material: '' },
+      items,
+    );
+    await service.saveDraft('exam', 0, draft);
+    await expect(service.start('exam', 'trial', 1)).rejects.toThrow(
+      '先确认评分细则',
+    );
+    draft.choiceGrids = [
+      {
+        id: 'g',
+        questionIds: ['1'],
+        orientation: 'rows',
+        region: { page: 0, x: 0, y: 0, width: 1, height: 0.25 },
+      },
+    ];
+    draft.questions[1].regions = [
+      { page: 0, x: 0.1, y: 0.45, width: 0.8, height: 0.4 },
+    ];
+    draft.phase = 'rubric';
+    draft.material = await service.readExamMaterials('exam', [
+      {
+        name: '规则.txt',
+        data: Buffer.from('1.B，37（1）维护清政府统治，2分。'),
+      },
+    ]);
+    await service.saveDraft('exam', 1, draft);
+    const composed = await service.proposeRubric('exam', draft, '');
+    const approved = applyRubricProposal(draft, composed);
+    await service.saveDraft('exam', 2, { ...approved, phase: 'ready' });
+    await service.start('exam', 'trial', 1);
+    await vi.waitFor(async () =>
+      expect((await service.get('exam')).trial?.status).toBe('review'),
+    );
+    const trial = (await service.get('exam')).trial!;
+    expect(trial.rows[0]).toMatchObject({
+      opticalMark: { status: 'single', selected: 'B' },
+      grade: { score: 2 },
+    });
+    expect(trial.rows[1]).toMatchObject({
+      transcript: '维护清政府统治',
+      grade: { score: 2 },
+    });
+    expect(recognition.requests).toHaveLength(2);
+    expect(grading.requests).toHaveLength(2);
+    expect(JSON.stringify(grading.requests)).not.toContain('image_url');
   } finally {
     shared.database.close();
     recognition.close();
