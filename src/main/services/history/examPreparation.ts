@@ -5,8 +5,10 @@ import { normalizeExamId } from '@preload/examDraft';
 import type {
   ExamCatalogItem,
   ExamMaterialFile,
+  ExamRubricItem,
   ExamRubricProposal,
   HistoryDraft,
+  HistoryQuestion,
 } from '@preload/history';
 import { requestHistoryJson, type HistoryConnection } from './historyModels';
 import { rubricProposalSchema } from './historyRules';
@@ -55,11 +57,46 @@ export async function detectExamCatalog(
   return [...unique.values()];
 }
 
+function rubricFields({
+  prompt,
+  reference,
+  source,
+  maxScore,
+  criteria,
+  answerKey,
+}: ExamRubricItem | HistoryQuestion) {
+  return { prompt, reference, source, maxScore, criteria, answerKey };
+}
+
 export async function organizeExamRubric(
   config: HistoryConnection,
   draft: HistoryDraft,
   instruction: string,
 ): Promise<ExamRubricProposal> {
+  const revising = Boolean(draft.rubricChat?.length);
+  const officialQwenFlash =
+    config.model === 'qwen3.8-flash' &&
+    new URL(config.baseUrl).hostname === 'maas.qianwenaiapi.com';
+  const pending = new Map(
+    draft.rubricSuggestion?.items.map((item) => [item.id, item]),
+  );
+  const firstTurn = draft.rubricChat?.[0];
+  const initialTeacherMessage =
+    firstTurn?.role === 'teacher' &&
+    (draft.material === firstTurn.text ||
+      draft.material.startsWith(firstTurn.text + '\n\n'))
+      ? firstTurn.text
+      : undefined;
+  const materials = initialTeacherMessage
+    ? draft.material.slice(initialTeacherMessage.length).trimStart()
+    : draft.material;
+  const conversation = draft.rubricChat
+    ?.slice(-12)
+    .map((turn) =>
+      initialTeacherMessage && turn === firstTurn
+        ? { ...turn, text: '首次教师消息原话见 initialTeacherMessage。' }
+        : turn,
+    );
   const response = await requestHistoryJson(
     config,
     '把教师提供的整份试卷、参考答案和给分说明按已确认题号整理成供教师审阅的草稿。' +
@@ -68,40 +105,61 @@ export async function organizeExamRubric(
       '发现题号、答案键、分值矛盾或缺项，逐题写在 issues，source 写材料名、页码或原文短句。' +
       '用 message 直接回复教师当前消息，可以答疑、请教师澄清或说明具体调了什么。纯讨论时 items 返回 []。' +
       '根据对话理解教师所指的问题。有修订要求时仅返回需改动的完整小题，保留该题其他规则。' +
-      'pendingItems 是尚未应用的建议，教师可继续修改；questions 是已保存的细则。' +
+      'initialTeacherMessage 是首次教师原话，保留其中教师明确提出的给分要求，按当前消息修订。' +
+      'questions 列出当前草稿，pending 为 true 的题来自待应用建议，applied 只列出与建议不同的已保存字段。' +
       '返回 JSON {"message":"摘要","issues":["待核对"],"items":[{"id":"1","prompt":"题干及该题材料","maxScore":2,' +
       '"reference":"答案或规则","source":"来源","criteria":[{"id":"1","text":"给分规则","maxScore":2}],"answerKey":null}]}。' +
       'choice 的 answerKey 用 A–D，criteria 为空；written 的采分项合计应等于满分，冲突时标在 issues。',
     JSON.stringify({
-      materials: draft.material,
+      materials,
+      initialTeacherMessage,
       priorReference: draft.reference,
       instruction,
-      conversation: draft.rubricChat?.slice(-12),
-      pendingItems: draft.rubricSuggestion?.items,
-      questions: draft.questions.map(
-        ({
-          id,
-          kind,
-          prompt,
-          reference,
-          source,
-          maxScore,
-          criteria,
-          answerKey,
-        }) => ({
-          id,
-          kind: kind ?? 'written',
-          prompt,
-          reference,
-          source,
-          maxScore,
-          criteria,
-          answerKey,
-        }),
-      ),
+      conversation,
+      questions: draft.questions.map((question) => {
+        const suggestion = pending.get(question.id);
+        const saved = rubricFields(question);
+        const current = suggestion ? rubricFields(suggestion) : saved;
+        const applied =
+          suggestion &&
+          (saved.maxScore ||
+            saved.prompt ||
+            saved.criteria.length ||
+            saved.answerKey)
+            ? Object.fromEntries(
+                (Object.keys(saved) as (keyof typeof saved)[])
+                  .filter(
+                    (key) =>
+                      JSON.stringify(saved[key] ?? null) !==
+                      JSON.stringify(current[key] ?? null),
+                  )
+                  .map((key) => [key, saved[key] ?? null]),
+              )
+            : undefined;
+        return {
+          id: question.id,
+          kind: question.kind ?? 'written',
+          ...current,
+          applied: applied && Object.keys(applied).length ? applied : undefined,
+          pending: suggestion ? true : undefined,
+        };
+      }),
     }),
+    {
+      operation: revising ? '评分细则修订' : '评分细则整理',
+      timeoutMs: 180_000,
+      stream: officialQwenFlash,
+      disableThinking: officialQwenFlash && revising,
+    },
   );
-  const parsed = rubricProposalSchema.parse(response);
+  const result = rubricProposalSchema.safeParse(response);
+  if (!result.success) {
+    const path = result.error.issues[0]?.path.join('.');
+    throw new Error(
+      `评分模型返回的细则字段不完整或格式有误${path ? `（${path}）` : ''}。`,
+    );
+  }
+  const parsed = result.data;
   const allowed = new Set(draft.questions.map((question) => question.id));
   const seen = new Set<string>();
   return {

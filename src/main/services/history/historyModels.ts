@@ -9,6 +9,10 @@ import type {
   HistorySource,
 } from '@preload/history';
 import { scoreHistoryAnswer } from './historyRules';
+import {
+  extractCompletionText,
+  extractStreamingDeltaText,
+} from '../llmStreamUtils';
 
 export type HistoryConnection = HistoryEndpoint & { apiKey: string };
 export const transcriptionSchema = z.discriminatedUnion('status', [
@@ -46,47 +50,131 @@ export async function cropHistorySource(
   return `data:image/png;base64,${crop.toString('base64')}`;
 }
 
+interface HistoryRequestOptions {
+  operation?: string;
+  timeoutMs?: number;
+  stream?: boolean;
+  disableThinking?: boolean;
+}
+
+function safeIdentifier(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[\w.:-]{1,96}$/.test(value)
+    ? value
+    : undefined;
+}
+
+function requestFailure(
+  error: unknown,
+  operation: string,
+  elapsed: number,
+  timedOut: boolean,
+): Error {
+  const time = `${(elapsed / 1000).toFixed(1)} 秒`;
+  if (timedOut || error instanceof OpenAI.APIConnectionTimeoutError)
+    return new Error(`${operation}等待超时（${time}）。`);
+  if (
+    error instanceof OpenAI.APIConnectionError ||
+    error instanceof TypeError
+  ) {
+    const cause = error.cause as
+      | { code?: unknown; cause?: { code?: unknown } }
+      | undefined;
+    const code = safeIdentifier(cause?.code ?? cause?.cause?.code);
+    return new Error(
+      `${operation}连接中断（${[time, code].filter(Boolean).join('，')}）。`,
+    );
+  }
+  if (error instanceof OpenAI.APIError) {
+    const details = [
+      error.status && `HTTP ${error.status}`,
+      safeIdentifier(error.code ?? error.type),
+      time,
+      safeIdentifier(error.requestID) && `请求 ID ${error.requestID}`,
+    ]
+      .filter(Boolean)
+      .join('，');
+    return new Error(`${operation}被模型服务拒绝（${details}）。`);
+  }
+  if (error instanceof SyntaxError)
+    return new Error(`${operation}的接口响应格式无效（${time}）。`);
+  return new Error(`${operation}读取响应失败（${time}）。`);
+}
+
 export async function requestHistoryJson(
   config: HistoryConnection,
   system: string,
   user: OpenAI.Chat.Completions.ChatCompletionUserMessageParam['content'],
+  options: HistoryRequestOptions = {},
 ): Promise<unknown> {
+  const timeout = options.timeoutMs ?? 90_000;
+  const operation = options.operation ?? '模型请求';
   const client = new OpenAI({
     baseURL: config.baseUrl,
     apiKey: config.apiKey,
-    timeout: 90_000,
+    timeout,
     maxRetries: 0,
+    logLevel: 'off',
   });
-  let response: OpenAI.Chat.Completions.ChatCompletion;
+  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+    { role: 'system', content: system },
+    { role: 'user', content: user },
+  ];
+  const signal = options.timeoutMs ? AbortSignal.timeout(timeout) : undefined;
+  const started = performance.now();
+  let text = '';
+  let finishReason: string | null | undefined;
   try {
-    response = await client.chat.completions.create({
-      model: config.model,
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: user },
-      ],
-    });
-  } catch (error) {
-    if (error instanceof OpenAI.APIError && error.status) {
-      throw new Error(
-        `模型接口返回 HTTP ${error.status}。请检查端点、密钥或额度。`,
+    const request = { model: config.model, messages };
+    if (options.stream) {
+      const stream = await client.chat.completions.create(
+        {
+          ...request,
+          stream: true,
+          ...(options.disableThinking && { enable_thinking: false }),
+        },
+        { signal },
       );
+      for await (const chunk of stream) {
+        const choice = chunk.choices?.[0];
+        text += extractStreamingDeltaText(choice?.delta?.content);
+        finishReason = choice?.finish_reason;
+        if (finishReason) break;
+      }
+      signal?.throwIfAborted();
+    } else {
+      const response = await client.chat.completions.create(request, {
+        signal,
+      });
+      const payload =
+        typeof response === 'string'
+          ? (JSON.parse(response) as OpenAI.Chat.Completions.ChatCompletion)
+          : response;
+      const choice = payload?.choices?.[0];
+      if (!choice) throw new SyntaxError('Missing completion choices');
+      text = extractCompletionText(choice.message?.content);
+      finishReason = choice.finish_reason;
     }
-    throw new Error('连接模型接口失败或超时。请检查网络和模型设置。');
+  } catch (error) {
+    throw requestFailure(
+      error,
+      operation,
+      performance.now() - started,
+      signal?.aborted ?? false,
+    );
   }
-  const choice = response.choices[0];
-  if (choice?.finish_reason === 'length') {
-    throw new Error('模型输出达到长度上限，请检查作答或模型配置。');
-  }
-  const content = choice?.message.content
-    ?.trim()
+  if (finishReason === 'length')
+    throw new Error(`${operation}达到模型输出长度上限。`);
+  if (finishReason === 'content_filter')
+    throw new Error(`${operation}触发模型服务的内容过滤。`);
+  const content = text
+    .trim()
     .replace(/^\x60{3}(?:json)?\s*/i, '')
     .replace(/\s*\x60{3}$/, '');
-  if (!content) throw new Error('模型未返回内容。');
+  if (!content) throw new Error(`${operation}未收到模型正文。`);
   try {
     return JSON.parse(content);
   } catch {
-    throw new Error('模型未返回有效 JSON。');
+    throw new Error(`${operation}收到的模型正文不是有效 JSON。`);
   }
 }
 

@@ -133,7 +133,10 @@ async function send() {
     includeReference.value = false;
     emit('save', false);
   } catch (err) {
-    error.value = String(err);
+    error.value = (err instanceof Error ? err.message : String(err)).replace(
+      /^Error invoking remote method 'history:(?:propose-rubric|read-exam-materials)': (?:Error: )?/,
+      '',
+    );
   } finally {
     waiting.value = false;
   }

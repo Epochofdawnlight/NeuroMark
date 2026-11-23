@@ -15,7 +15,7 @@ const resources = path.resolve(resourcesArg);
 const stage = path.resolve(stageArg);
 const referenceApp = path.join(resources, 'app');
 const targetApp = path.join(stage, 'resources', 'app');
-const version = '1.4.0';
+const version = '1.4.1';
 const appId = 'io.github.epochofdawnlight.historygrading';
 if (fs.existsSync(stage))
   throw new Error('Choose an empty, newly named staging directory.');
