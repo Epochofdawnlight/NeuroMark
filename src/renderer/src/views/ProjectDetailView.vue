@@ -63,6 +63,7 @@ import type {
   ProjectSettings,
 } from '@preload/contracts';
 import ImagePreviewTile from '@/components/ImagePreviewTile.vue';
+import HistoryWorkspace from '@/components/history/HistoryWorkspace.vue';
 import JsonTreeView from '@/components/JsonTreeView.vue';
 import MarkdownRenderer from '@/components/MarkdownRenderer.vue';
 import MetricCard from '@/components/MetricCard.vue';
@@ -3234,6 +3235,16 @@ function goBack() {
             </n-card>
           </div>
           <n-empty v-else description="导入原始答卷后即可启动扫描识别" />
+        </n-tab-pane>
+
+        <n-tab-pane name="history-grading" tab="历史阅卷" display-directive="if">
+          <HistoryWorkspace
+            v-if="detail"
+            :key="projectId"
+            :project-id="projectId"
+            :papers="detail.originals"
+            :reference-answer="detail.referenceAnswerMarkdown"
+          />
         </n-tab-pane>
 
         <n-tab-pane name="results" tab="批阅结果">

@@ -8,6 +8,22 @@ import type {
 } from './contracts';
 
 const api: NeuromarkApi = {
+  history: {
+    get: (...args) => ipcRenderer.invoke('history:get', ...args),
+    getRun: (...args) => ipcRenderer.invoke('history:get-run', ...args),
+    bindStudent: (...args) => ipcRenderer.invoke('history:bind-student', ...args),
+    saveProviders: (...args) => ipcRenderer.invoke('history:save-providers', ...args),
+    testProvider: (...args) => ipcRenderer.invoke('history:test-provider', ...args),
+    saveDraft: (...args) => ipcRenderer.invoke('history:save-draft', ...args),
+    start: (...args) => ipcRenderer.invoke('history:start', ...args),
+    resume: (...args) => ipcRenderer.invoke('history:resume', ...args),
+    preview: (...args) => ipcRenderer.invoke('history:preview', ...args),
+    correctTranscript: (...args) => ipcRenderer.invoke('history:correct-transcript', ...args),
+    audit: (...args) => ipcRenderer.invoke('history:audit', ...args),
+    approveTrial: (...args) => ipcRenderer.invoke('history:approve-trial', ...args),
+    confirmFormal: (...args) => ipcRenderer.invoke('history:confirm-formal', ...args),
+    export: (...args) => ipcRenderer.invoke('history:export', ...args),
+  },
   app: {
     getVersion: () => ipcRenderer.invoke('app:get-version'),
     getDefaultProjectBasePath: () =>

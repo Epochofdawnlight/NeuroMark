@@ -1088,6 +1088,7 @@ export class ProjectService {
     db.delete(paperRecordsTable)
       .where(eq(paperRecordsTable.projectId, projectId))
       .run();
+    db.$client.prepare('DELETE FROM history_workspaces WHERE project_id = ?').run(projectId);
     db.delete(projectsTable).where(eq(projectsTable.id, projectId)).run();
   }
 

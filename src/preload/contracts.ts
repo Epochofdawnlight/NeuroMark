@@ -724,6 +724,7 @@ export type ScorePostProcessAiUpdateHandler = (
 ) => void;
 
 export interface NeuromarkApi {
+  history: import('./history').HistoryApi;
   app: {
     getVersion: () => Promise<string>;
     getDefaultProjectBasePath: () => Promise<string>;

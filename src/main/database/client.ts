@@ -37,6 +37,11 @@ function ensureSchema(connection: Database.Database): void {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS history_workspaces (
+      project_id TEXT PRIMARY KEY,
+      state_json TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS paper_records (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,

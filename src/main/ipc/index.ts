@@ -2,6 +2,7 @@ import type { ServiceBundle } from '@main/services/types';
 import { registerAnswerGeneratorIpc } from './answerGenerator';
 import { registerAppIpc } from './app';
 import { registerGradingIpc } from './grading';
+import { registerHistoryIpc } from './history';
 import { registerPreviewIpc } from './preview';
 import { registerProjectIpc } from './projects';
 import { registerScanIpc } from './scan';
@@ -16,6 +17,7 @@ export function registerIpcHandlers(services: ServiceBundle): void {
   registerProjectIpc(services);
   registerScanIpc(services);
   registerGradingIpc(services);
+  registerHistoryIpc(services.projects);
   registerSettingsIpc(services);
   registerScorePostProcessIpc(services);
   registerLlmUsageIpc(services);
