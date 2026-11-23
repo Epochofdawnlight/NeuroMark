@@ -55,6 +55,11 @@ export interface ExamRubricProposal {
   issues: string[];
   items: ExamRubricItem[];
 }
+export interface RubricChatMessage {
+  role: 'teacher' | 'assistant';
+  text: string;
+  attachments?: string[];
+}
 export interface ExamMaterialFile {
   name: string;
   data: Uint8Array;
@@ -68,6 +73,8 @@ export interface HistoryDraft {
   regionsByPaper?: Record<string, Record<string, HistoryRegion[]>>;
   choiceGrids?: ChoiceGrid[];
   rubricIssues?: string[];
+  rubricChat?: RubricChatMessage[];
+  rubricSuggestion?: ExamRubricProposal;
 }
 
 export interface HistoryEndpoint {

@@ -21,11 +21,46 @@ const regionSchema = z
 
 export const historyRegionsSchema = z.array(regionSchema).max(100);
 
+const criterionSchema = z.object({
+  id: z.string().trim().min(1),
+  text: z.string().trim(),
+  maxScore: z.number().positive(),
+});
+
+export const rubricProposalSchema = z.object({
+  message: z.string(),
+  issues: z.array(z.string()),
+  items: z.array(
+    z.object({
+      id: z.string().min(1),
+      prompt: z.string(),
+      maxScore: z.number().min(0),
+      reference: z.string(),
+      source: z.string(),
+      criteria: z.array(criterionSchema),
+      answerKey: z
+        .enum(['A', 'B', 'C', 'D'])
+        .nullish()
+        .transform((value) => value ?? undefined),
+    }),
+  ),
+});
+
 const draftSchema = z.object({
   phase: z.enum(['catalog', 'regions', 'rubric', 'ready']).optional(),
   reference: z.string().trim(),
   material: z.string().trim(),
   rubricIssues: z.array(z.string()).optional(),
+  rubricChat: z
+    .array(
+      z.object({
+        role: z.enum(['teacher', 'assistant']),
+        text: z.string(),
+        attachments: z.array(z.string()).optional(),
+      }),
+    )
+    .optional(),
+  rubricSuggestion: rubricProposalSchema.optional(),
   regionsByPaper: z
     .record(z.string(), z.record(z.string(), historyRegionsSchema))
     .optional(),
@@ -49,13 +84,7 @@ const draftSchema = z.object({
       reference: z.string().trim().optional(),
       source: z.string().trim().optional(),
       regions: historyRegionsSchema,
-      criteria: z.array(
-        z.object({
-          id: z.string().trim().min(1),
-          text: z.string().trim(),
-          maxScore: z.number().positive(),
-        }),
-      ),
+      criteria: z.array(criterionSchema),
     }),
   ),
 });

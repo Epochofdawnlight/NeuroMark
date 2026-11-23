@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import {
   NAlert,
   NButton,
@@ -23,69 +23,115 @@ const props = defineProps<{
   referenceAnswer: string;
   disabled: boolean;
 }>();
-const emit = defineEmits<{ confirm: []; save: [] }>();
+const emit = defineEmits<{
+  confirm: [];
+  save: [applied: boolean];
+  working: [value: boolean];
+}>();
 const draft = defineModel<HistoryDraft>({ required: true });
 const request = ref('');
-const proposal = ref<ExamRubricProposal>();
+const files = ref<File[]>([]);
+const includeReference = ref(false);
 const waiting = ref(false);
 const error = ref('');
 const checked = ref(false);
-const conversation = ref<{ role: 'teacher' | 'assistant'; value: string }[]>(
-  [],
+const transcript = ref<HTMLElement>();
+const uploader = ref<HTMLInputElement>();
+const chat = computed(() => draft.value.rubricChat ?? []);
+const suggestion = computed(() => draft.value.rubricSuggestion);
+const existingMaterial = computed(() =>
+  Boolean(draft.value.material.trim() || draft.value.reference.trim()),
+);
+const hasReference = computed(
+  () =>
+    Boolean(props.referenceAnswer.trim()) &&
+    !props.referenceAnswer.startsWith('# 尚未上传'),
+);
+const canSend = computed(() =>
+  Boolean(
+    request.value.trim() ||
+    files.value.length ||
+    includeReference.value ||
+    (!chat.value.length && existingMaterial.value),
+  ),
+);
+const hasRules = computed(() =>
+  draft.value.questions.some((item) => item.maxScore > 0),
 );
 
-function plain<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
-}
+watch([() => chat.value.length, waiting], async () => {
+  await nextTick();
+  if (transcript.value)
+    transcript.value.scrollTop = transcript.value.scrollHeight;
+});
+watch(waiting, (value) => emit('working', value), { flush: 'sync' });
 
-async function attachments(event: Event) {
+function selectFiles(event: Event) {
   const input = event.target as HTMLInputElement;
-  const files = Array.from(input.files ?? []);
+  files.value.push(...Array.from(input.files ?? []));
   input.value = '';
-  if (!files.length) return;
+}
+
+function combineSuggestion(
+  next: ExamRubricProposal,
+): ExamRubricProposal | undefined {
+  const prior = suggestion.value;
+  if (!next.items.length && !next.issues.length) return prior;
+  if (!prior) return next;
+  const items = new Map(prior.items.map((item) => [item.id, item]));
+  for (const item of next.items) items.set(item.id, item);
+  return { ...next, items: [...items.values()] };
+}
+
+async function send() {
+  if (!canSend.value || waiting.value || props.disabled) return;
+  const text = request.value.trim();
+  const attachments = files.value.map((file) => file.name);
+  const prior = draft.value;
+  const initialText = !chat.value.length && !existingMaterial.value ? text : '';
   waiting.value = true;
   error.value = '';
   try {
-    const material = await window.neuromark.history.readExamMaterials(
+    const extracted = files.value.length
+      ? await window.neuromark.history.readExamMaterials(
+          props.projectId,
+          await Promise.all(
+            files.value.map(async (file) => ({
+              name: file.name,
+              data: new Uint8Array(await file.arrayBuffer()),
+            })),
+          ),
+        )
+      : '';
+    if (includeReference.value) attachments.push('项目参考答案');
+    const material = [
+      prior.material,
+      initialText,
+      extracted,
+      includeReference.value ? props.referenceAnswer : '',
+    ]
+      .filter((value) => value.trim())
+      .join('\n\n');
+    const instruction = text || '请根据已有材料整理逐题评分细则。';
+    const nextDraft = { ...prior, material };
+    const reply = await window.neuromark.history.proposeRubric(
       props.projectId,
-      await Promise.all(
-        files.map(async (file) => ({
-          name: file.name,
-          data: new Uint8Array(await file.arrayBuffer()),
-        })),
-      ),
-    );
-    append(material);
-  } catch (err) {
-    error.value = String(err);
-  } finally {
-    waiting.value = false;
-  }
-}
-
-function append(text: string) {
-  draft.value.material = [draft.value.material, text]
-    .filter((value) => value.trim())
-    .join('\n\n');
-}
-
-async function generate(specify: boolean) {
-  const instruction = specify ? request.value.trim() : '';
-  if (specify && !instruction) return;
-  waiting.value = true;
-  error.value = '';
-  try {
-    const next = await window.neuromark.history.proposeRubric(
-      props.projectId,
-      plain({ ...draft.value, phase: 'rubric' }),
+      JSON.parse(JSON.stringify(nextDraft)),
       instruction,
     );
-    if (instruction) {
-      conversation.value.push({ role: 'teacher', value: instruction });
-      request.value = '';
-    }
-    proposal.value = next;
-    conversation.value.push({ role: 'assistant', value: next.message });
+    draft.value = {
+      ...nextDraft,
+      rubricChat: [
+        ...chat.value,
+        { role: 'teacher', text: text || instruction, attachments },
+        { role: 'assistant', text: reply.message },
+      ],
+      rubricSuggestion: combineSuggestion(reply),
+    };
+    request.value = '';
+    files.value = [];
+    includeReference.value = false;
+    emit('save', false);
   } catch (err) {
     error.value = String(err);
   } finally {
@@ -93,12 +139,16 @@ async function generate(specify: boolean) {
   }
 }
 
-function apply() {
-  if (!proposal.value) return;
-  draft.value = applyRubricProposal(draft.value, proposal.value);
-  checked.value = false;
-  proposal.value = undefined;
-  emit('save');
+function reviewSuggestion(apply: boolean) {
+  if (!suggestion.value) return;
+  draft.value = {
+    ...(apply
+      ? applyRubricProposal(draft.value, suggestion.value)
+      : draft.value),
+    rubricSuggestion: undefined,
+  };
+  if (apply) checked.value = false;
+  emit('save', apply);
 }
 
 function addRule(question: HistoryQuestion) {
@@ -107,54 +157,164 @@ function addRule(question: HistoryQuestion) {
 </script>
 
 <template>
-  <n-card size="small" title="把试卷、答案和给分说明放在一起">
-    <n-space vertical>
-      <n-input
-        v-model:value="draft.material"
-        type="textarea"
-        :autosize="{ minRows: 6, maxRows: 16 }"
-        placeholder="把题干、材料、参考答案、评分细则或口头给分说明一起粘贴到这里"
-        :disabled="disabled || waiting"
-      />
-      <n-space align="center">
-        <label
-          >上传材料
-          <input
-            type="file"
-            multiple
-            accept=".txt,.md,.pdf,.png,.jpg,.jpeg,.webp"
-            :disabled="disabled || waiting"
-            @change="attachments"
-          />
-        </label>
-        <n-button
+  <n-card size="small" title="评分细则助手" class="chat-card">
+    <div
+      ref="transcript"
+      class="transcript"
+      role="log"
+      aria-label="评分细则对话"
+    >
+      <div class="chat-row assistant">
+        <div class="bubble">
+          <strong>评分助手</strong>
+          <p>
+            把试卷、参考答案和给分说明发在这里。我会按已确认的题号整理草稿，有疑问也可以接着聊。
+          </p>
+        </div>
+      </div>
+      <div
+        v-for="(item, index) in chat"
+        :key="index"
+        class="chat-row"
+        :class="item.role"
+      >
+        <div class="bubble">
+          <strong>{{ item.role === 'teacher' ? '你' : '评分助手' }}</strong>
+          <p v-if="item.text">{{ item.text }}</p>
+          <n-space v-if="item.attachments?.length" size="small">
+            <n-tag
+              v-for="(name, i) in item.attachments"
+              :key="i"
+              size="small"
+              >{{ name }}</n-tag
+            >
+          </n-space>
+        </div>
+      </div>
+      <div v-if="waiting" role="status" class="chat-row assistant">
+        <div class="bubble">正在处理这条消息…</div>
+      </div>
+      <div v-if="suggestion" class="chat-row assistant">
+        <div class="bubble suggestion">
+          <strong>待审阅草稿</strong>
+          <details
+            v-for="item in suggestion.items"
+            :key="item.id"
+            class="rubric-item"
+          >
+            <summary>
+              {{ item.id }} ·
+              {{ item.maxScore ? `${item.maxScore} 分` : '满分待核对' }}
+            </summary>
+            <p v-if="item.prompt">{{ item.prompt }}</p>
+            <p v-if="item.answerKey">答案 {{ item.answerKey }}</p>
+            <p v-if="item.reference">{{ item.reference }}</p>
+            <ul v-if="item.criteria.length">
+              <li v-for="(rule, i) in item.criteria" :key="i">
+                {{ rule.text }} · {{ rule.maxScore }} 分
+              </li>
+            </ul>
+            <p v-if="item.source">材料依据 · {{ item.source }}</p>
+          </details>
+          <n-alert
+            v-if="suggestion.issues.length"
+            type="warning"
+            title="需要核对"
+          >
+            <ul>
+              <li v-for="(issue, i) in suggestion.issues" :key="i">
+                {{ issue }}
+              </li>
+            </ul>
+          </n-alert>
+          <n-space class="suggestion-actions">
+            <n-button
+              type="primary"
+              size="small"
+              :disabled="disabled || waiting || !suggestion.items.length"
+              @click="reviewSuggestion(true)"
+            >
+              应用到细则
+            </n-button>
+            <n-button
+              size="small"
+              :disabled="disabled || waiting"
+              @click="reviewSuggestion(false)"
+              >舍弃草稿</n-button
+            >
+          </n-space>
+        </div>
+      </div>
+    </div>
+    <form class="composer" @submit.prevent="send">
+      <n-alert v-if="error" type="warning">{{ error }}</n-alert>
+      <n-space v-if="files.length || includeReference" size="small">
+        <n-tag
+          v-for="(file, index) in files"
+          :key="index"
           size="small"
-          :disabled="
-            disabled ||
-            waiting ||
-            referenceAnswer.startsWith('# 尚未上传') ||
-            !referenceAnswer
-          "
-          @click="append(referenceAnswer)"
-          >加入已有项目参考答案</n-button
+          :closable="!waiting"
+          @close="files.splice(index, 1)"
         >
-        <n-button
-          type="primary"
-          :loading="waiting"
-          :disabled="
-            disabled || (!draft.material.trim() && !draft.reference.trim())
-          "
-          @click="generate(false)"
-          >生成逐题评分草稿</n-button
+          {{ file.name }}
+        </n-tag>
+        <n-tag
+          v-if="includeReference"
+          size="small"
+          :closable="!waiting"
+          @close="includeReference = false"
+          >项目参考答案</n-tag
         >
       </n-space>
-      <n-alert v-if="error" type="warning">{{ error }}</n-alert>
-    </n-space>
+      <n-input
+        v-model:value="request"
+        type="textarea"
+        :autosize="{ minRows: 3, maxRows: 8 }"
+        aria-label="给评分助手发消息"
+        placeholder="粘贴试卷、答案、给分说明，或继续提出修改"
+        :disabled="disabled || waiting"
+        @keydown.ctrl.enter.prevent="send"
+      />
+      <div class="composer-actions">
+        <input
+          ref="uploader"
+          class="file-input"
+          type="file"
+          multiple
+          accept=".txt,.md,.pdf,.png,.jpg,.jpeg,.webp"
+          @change="selectFiles"
+        />
+        <n-space size="small">
+          <n-button
+            size="small"
+            :disabled="disabled || waiting"
+            @click="uploader?.click()"
+            >添加附件</n-button
+          >
+          <n-button
+            v-if="hasReference"
+            size="small"
+            :disabled="disabled || waiting || includeReference"
+            @click="includeReference = true"
+          >
+            加入项目参考答案
+          </n-button>
+        </n-space>
+        <n-button
+          type="primary"
+          attr-type="submit"
+          :loading="waiting"
+          :disabled="disabled || waiting || !canSend"
+          >发送</n-button
+        >
+      </div>
+    </form>
   </n-card>
 
-  <div class="rubric-layout">
-    <n-card size="small" title="逐题细则">
-      <n-space vertical>
+  <n-card v-if="hasRules" size="small" class="review-card">
+    <details>
+      <summary>查看或手动调整已应用的细则</summary>
+      <n-space vertical class="applied-rules">
         <details
           v-for="question in draft.questions"
           :key="question.id"
@@ -236,108 +396,97 @@ function addRule(question: HistoryQuestion) {
             <p v-if="question.source">材料依据 · {{ question.source }}</p>
           </n-space>
         </details>
-        <n-alert
-          v-if="draft.rubricIssues?.length"
-          type="warning"
-          title="需教师核对"
-        >
-          <ul>
-            <li v-for="issue in draft.rubricIssues" :key="issue">
-              {{ issue }}
-            </li>
-          </ul>
-          <n-checkbox v-model:checked="checked">我已核对这些提示</n-checkbox>
-        </n-alert>
-        <n-button
-          type="primary"
-          :disabled="
-            disabled ||
-            waiting ||
-            Boolean(proposal) ||
-            Boolean(draft.rubricIssues?.length && !checked)
-          "
-          @click="emit('confirm')"
-          >确认细则，进入试阅</n-button
-        >
       </n-space>
-    </n-card>
-
-    <n-card size="small" title="用一句话修订">
-      <n-space vertical>
-        <div v-for="(item, index) in conversation" :key="index" class="message">
-          <strong>{{ item.role === 'teacher' ? '教师' : '评分助手' }}</strong>
-          <div>{{ item.value }}</div>
-        </div>
-        <n-input
-          v-model:value="request"
-          type="textarea"
-          :disabled="disabled || waiting"
-          placeholder="如：37(1) 允许引用材料原文，意思对即可给分。"
-        />
-        <n-button
-          :loading="waiting"
-          :disabled="disabled || !request.trim()"
-          @click="generate(true)"
-          >提出修改</n-button
-        >
-        <template v-if="proposal">
-          <n-alert type="info" title="待确认的修改"
-            >下面是这次提议涉及的小题。应用后仍可以编辑细则。</n-alert
-          >
-          <div v-for="item in proposal.items" :key="item.id" class="proposal">
-            <strong
-              >{{ item.id }} · {{ item.maxScore || '满分待核对'
-              }}{{ item.maxScore ? ' 分' : '' }}</strong
-            >
-            <div v-if="item.answerKey">答案 {{ item.answerKey }}</div>
-            <div v-if="item.reference">{{ item.reference }}</div>
-            <ul v-if="item.criteria.length">
-              <li v-for="rule in item.criteria" :key="rule.id">
-                {{ rule.text }} · {{ rule.maxScore }} 分
-              </li>
-            </ul>
-          </div>
-          <n-alert
-            v-if="proposal.issues.length"
-            type="warning"
-            title="模型发现的缺项"
-          >
-            <ul>
-              <li v-for="issue in proposal.issues" :key="issue">{{ issue }}</li>
-            </ul>
-          </n-alert>
-          <n-space>
-            <n-button
-              type="primary"
-              :disabled="disabled || waiting || !proposal.items.length"
-              @click="apply"
-              >应用到草稿</n-button
-            >
-            <n-button :disabled="waiting" @click="proposal = undefined"
-              >舍弃</n-button
-            >
-          </n-space>
-        </template>
-      </n-space>
-    </n-card>
-  </div>
+    </details>
+    <n-alert
+      v-if="draft.rubricIssues?.length"
+      type="warning"
+      title="需教师核对"
+      class="review-actions"
+    >
+      <ul>
+        <li v-for="issue in draft.rubricIssues" :key="issue">{{ issue }}</li>
+      </ul>
+      <n-checkbox v-model:checked="checked" :disabled="disabled || waiting"
+        >我已核对这些提示</n-checkbox
+      >
+    </n-alert>
+    <n-button
+      class="review-actions"
+      type="primary"
+      :disabled="
+        disabled ||
+        waiting ||
+        Boolean(suggestion) ||
+        Boolean(draft.rubricIssues?.length && !checked)
+      "
+      @click="emit('confirm')"
+      >确认细则，进入试阅</n-button
+    >
+  </n-card>
 </template>
 
 <style scoped>
-.rubric-layout {
+.transcript {
   display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  align-content: start;
   gap: 14px;
+  min-height: 230px;
+  max-height: min(52vh, 580px);
+  overflow: auto;
+  padding: 6px 8px 16px;
+}
+.chat-row {
+  display: flex;
+}
+.chat-row.teacher {
+  justify-content: flex-end;
+}
+.bubble {
+  max-width: min(86%, 850px);
+  background: #7e9cba1c;
+  padding: 10px 14px;
+  border-radius: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.teacher .bubble {
+  background: #14878224;
+}
+.bubble p {
+  margin: 5px 0;
+  white-space: pre-wrap;
+}
+.suggestion {
+  width: min(86%, 850px);
+}
+.composer {
+  display: grid;
+  gap: 9px;
+  border-top: 1px solid #7e9cba44;
+  padding-top: 12px;
+}
+.composer-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+.file-input {
+  display: none;
 }
 .rubric-item {
-  border-bottom: 1px solid #e2e8ee;
+  border-bottom: 1px solid #7e9cba44;
   padding: 8px 0;
 }
-.rubric-item summary {
+summary {
   cursor: pointer;
 }
-.rule-fields {
-  margin: 10px 0;
+.review-actions,
+.applied-rules,
+.rule-fields,
+.suggestion-actions {
+  margin-top: 10px;
 }
 .criterion {
   display: grid;
@@ -345,20 +494,8 @@ function addRule(question: HistoryQuestion) {
   gap: 8px;
   align-items: start;
 }
-.message,
-.proposal {
-  background: #7e9cba15;
-  padding: 9px;
-  white-space: pre-wrap;
-  border-radius: 6px;
-}
 ul {
   margin: 6px 0;
   padding-left: 20px;
-}
-@media (max-width: 780px) {
-  .rubric-layout {
-    grid-template-columns: 1fr;
-  }
 }
 </style>

@@ -3,7 +3,10 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import fs from 'fs-extra';
 import { app } from 'electron';
+import { createCanvas, loadImage } from '@napi-rs/canvas';
+import sharp, { type Sharp } from 'sharp';
 import type { CornerPoint } from '@preload/contracts';
+import { hasPaperBoundary } from './scanPaperBoundary';
 
 const require = createRequire(import.meta.url);
 
@@ -163,6 +166,32 @@ function shouldWriteDebugArtifacts(
   return process.env.NEUROMARK_SCANCPP_DEBUG === '1';
 }
 
+async function openScanSource(inputPath: string): Promise<Sharp> {
+  if (path.extname(inputPath).toLowerCase() !== '.bmp') return sharp(inputPath);
+  // The canvas codec decodes BMP on platforms where libvips does not.
+  const bitmap = await loadImage(await fs.readFile(inputPath));
+  const canvas = createCanvas(bitmap.width, bitmap.height);
+  canvas.getContext('2d').drawImage(bitmap, 0, 0);
+  return sharp(canvas.toBuffer('image/png'));
+}
+
+async function writeFullPage(
+  image: Sharp,
+  scannedPath: string,
+  debugPreviewPath: string,
+) {
+  const source = image.clone().rotate();
+  const [scan] = await Promise.all([
+    source.clone().png().toFile(scannedPath),
+    source
+      .clone()
+      .flatten({ background: 'white' })
+      .jpeg({ quality: 90 })
+      .toFile(debugPreviewPath),
+  ]);
+  return scan;
+}
+
 export async function processDocumentImage(
   inputPath: string,
   scannedPath: string,
@@ -173,12 +202,10 @@ export async function processDocumentImage(
   await fs.ensureDir(path.dirname(scannedPath));
   await fs.ensureDir(path.dirname(debugPreviewPath));
   await fs.ensureDir(path.dirname(cornersPath));
+  const source = await openScanSource(inputPath);
 
   if (options?.skipScanProcessing) {
-    await Promise.all([
-      fs.copyFile(inputPath, scannedPath),
-      fs.copyFile(inputPath, debugPreviewPath),
-    ]);
+    await writeFullPage(source, scannedPath, debugPreviewPath);
 
     const corners: CornerPoint[] = [];
     await fs.writeJson(
@@ -212,18 +239,55 @@ export async function processDocumentImage(
       )
     : undefined;
 
-  const nativeResult = await scanner.scanDocument({
-    inputPath,
-    scannedOutputPath: scannedPath,
-    overlayOutputPath: debugPreviewPath,
-    debugOutputPrefix,
-    writeDebugImages: writeDebugArtifacts,
-    applyPostProcess: options?.applyPostProcess ?? true,
-    scanMarginRatio: options?.scanMarginRatio ?? 1,
-  });
+  const staging = await fs.mkdtemp(
+    path.join(path.dirname(cornersPath), '.scan-'),
+  );
+  const pendingScan = path.join(staging, 'scan.png');
+  const pendingPreview = path.join(staging, 'preview.jpg');
+  let nativeResult: NativeScanResult | undefined;
+  let corrected: boolean;
+  let fullPage: Awaited<ReturnType<typeof writeFullPage>> | undefined;
+  try {
+    nativeResult = await scanner
+      .scanDocument({
+        inputPath,
+        scannedOutputPath: pendingScan,
+        overlayOutputPath: pendingPreview,
+        debugOutputPrefix,
+        writeDebugImages: writeDebugArtifacts,
+        applyPostProcess: options?.applyPostProcess ?? true,
+        scanMarginRatio: options?.scanMarginRatio ?? 1,
+      })
+      .catch((error: unknown) => {
+        if (
+          error instanceof Error &&
+          (error.message ===
+            'No document contour found in the saliency mask.' ||
+            error.message === 'Detected contour is too small to be a document.')
+        )
+          return undefined;
+        throw error;
+      });
+    corrected = Boolean(
+      nativeResult &&
+      (await hasPaperBoundary(
+        source.clone(),
+        nativeResult.sourceWidth,
+        nativeResult.sourceHeight,
+        nativeResult.detectedCorners,
+      )),
+    );
+    if (!corrected)
+      fullPage = await writeFullPage(source, pendingScan, pendingPreview);
+    await fs.move(pendingScan, scannedPath, { overwrite: true });
+    await fs.move(pendingPreview, debugPreviewPath, { overwrite: true });
+  } finally {
+    await fs.remove(staging);
+  }
 
-  const corners = toCornerPoints(nativeResult.corners);
-  const detectedCorners = toCornerPoints(nativeResult.detectedCorners);
+  const detectedCorners = toCornerPoints(nativeResult?.detectedCorners ?? []);
+  const corners =
+    corrected && nativeResult ? toCornerPoints(nativeResult.corners) : [];
 
   await fs.writeJson(
     cornersPath,
@@ -231,16 +295,19 @@ export async function processDocumentImage(
       scanner: 'scancpp-native',
       model: path.basename(resolveModelPath()),
       corners,
-      bounds: createBoundsFromCorners(corners),
+      bounds: corrected ? createBoundsFromCorners(corners) : undefined,
+      decision: corrected ? 'perspective-corrected' : 'keep-full-page',
       detectedCorners,
-      detectedBounds: createBoundsFromCorners(detectedCorners),
-      sourceWidth: nativeResult.sourceWidth,
-      sourceHeight: nativeResult.sourceHeight,
-      scannedWidth: nativeResult.scannedWidth,
-      scannedHeight: nativeResult.scannedHeight,
-      applyPostProcess: options?.applyPostProcess ?? true,
+      detectedBounds: detectedCorners.length
+        ? createBoundsFromCorners(detectedCorners)
+        : undefined,
+      sourceWidth: nativeResult?.sourceWidth ?? fullPage?.width,
+      sourceHeight: nativeResult?.sourceHeight ?? fullPage?.height,
+      scannedWidth: fullPage?.width ?? nativeResult?.scannedWidth,
+      scannedHeight: fullPage?.height ?? nativeResult?.scannedHeight,
+      applyPostProcess: corrected && (options?.applyPostProcess ?? true),
       scanMarginRatio: options?.scanMarginRatio ?? 1,
-      debugOutputPaths: nativeResult.debugOutputPaths,
+      debugOutputPaths: nativeResult?.debugOutputPaths ?? [],
       generatedAt: new Date().toISOString(),
     },
     { spaces: 2 },

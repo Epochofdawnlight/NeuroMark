@@ -5326,7 +5326,7 @@ function goBack() {
                   <div class="create-project-toggle-copy">
                     <div class="field-label">扫描后处理</div>
                     <div class="field-hint">
-                      关闭后只做边界识别、透视拉平与裁剪，不做增强和二值化。
+                      自动扫描只在确认纸张外缘后透视校正。此开关控制校正后的增强与二值化。
                     </div>
                   </div>
                   <n-switch

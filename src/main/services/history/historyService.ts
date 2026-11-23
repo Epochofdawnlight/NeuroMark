@@ -575,9 +575,18 @@ export class HistoryService {
       throw new Error('细则已经更新，请刷新后编辑。');
     const draft = validateHistoryDraft(input);
     if (JSON.stringify(draft) === JSON.stringify(state.draft)) return;
-    state.revision += 1;
+    const withoutChat = (value: HistoryDraft) =>
+      JSON.stringify({
+        ...value,
+        material: value.phase ? undefined : value.material,
+        rubricChat: undefined,
+        rubricSuggestion: undefined,
+      });
+    if (withoutChat(draft) !== withoutChat(state.draft)) {
+      state.revision += 1;
+      state.approvedTrialId = undefined;
+    }
     state.draft = draft;
-    state.approvedTrialId = undefined;
     this.write(projectId, state);
   }
 
@@ -614,6 +623,14 @@ export class HistoryService {
         throw new Error('原样本中的答卷已移除，请重新随机抽取。');
       }
       const rows = buildRows(selected, draft);
+      if (kind === 'formal' && state.trial) {
+        const currentKeys = new Set(rows.map((row) => row.cacheKey));
+        if (state.trial.rows.some((row) => !currentKeys.has(row.cacheKey))) {
+          throw new Error(
+            '试阅样卷或扫描结果已变更。请检查答题区域并重新试阅。',
+          );
+        }
+      }
       const previous = state[kind];
       const run: HistoryRun = {
         id: randomUUID(),

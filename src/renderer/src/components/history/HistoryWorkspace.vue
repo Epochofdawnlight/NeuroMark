@@ -61,6 +61,7 @@ const unlocked = computed(() => {
 });
 const archived = ref<HistoryRun>();
 const busy = ref(false);
+const rubricBusy = ref(false);
 const loadingError = ref('');
 let timer: ReturnType<typeof setInterval> | undefined;
 let refreshId = 0;
@@ -153,7 +154,7 @@ async function start(kind: 'trial' | 'formal', repeat = false) {
   });
 }
 
-function savePhase(next: HistoryDraft, step: View, success: string) {
+function savePhase(next: HistoryDraft, step: View, success?: string) {
   return act(
     async () => {
       await api.saveDraft(
@@ -222,12 +223,13 @@ onBeforeUnmount(() => {
           v-for="(step, index) in steps"
           :key="step.id"
           :type="view === step.id ? 'primary' : 'default'"
-          :disabled="busy || index > unlocked"
+          :disabled="busy || rubricBusy || index > unlocked"
           @click="view = step.id"
           >{{ index + 1 }}. {{ step.title }}</n-button
         >
         <n-button
           :type="view === 'archive' ? 'primary' : 'default'"
+          :disabled="rubricBusy"
           @click="view = 'archive'"
           >历次批阅</n-button
         >
@@ -311,22 +313,29 @@ onBeforeUnmount(() => {
           >确认切题，进入材料与细则</n-button
         >
       </template>
-      <RubricWorkbench
-        v-if="view === 'rubric'"
-        v-model="draft"
-        :project-id="projectId"
-        :reference-answer="referenceAnswer"
-        :disabled="busy || running"
-        @save="
-          savePhase({ ...draft, phase: 'rubric' }, 'rubric', '评分草稿已保存')
-        "
-        @confirm="
-          savePhase({ ...draft, phase: 'ready' }, 'trial', '评分细则已确认')
-        "
-      />
+      <div
+        v-if="unlocked >= 2"
+        v-show="view === 'rubric'"
+        class="rubric-workbench"
+      >
+        <RubricWorkbench
+          v-model="draft"
+          :project-id="projectId"
+          :reference-answer="referenceAnswer"
+          :disabled="busy || running"
+          @working="rubricBusy = $event"
+          @save="
+            (applied) =>
+              savePhase(draft, view, applied ? '评分草稿已保存' : undefined)
+          "
+          @confirm="
+            savePhase({ ...draft, phase: 'ready' }, 'trial', '评分细则已确认')
+          "
+        />
+      </div>
       <n-space v-if="view === 'regions' || view === 'rubric'" align="center">
         <n-button
-          :disabled="busy || running || !dirty"
+          :disabled="busy || running || rubricBusy || !dirty"
           @click="
             savePhase(
               { ...draft, phase: view === 'regions' ? 'regions' : 'rubric' },
@@ -554,6 +563,10 @@ onBeforeUnmount(() => {
   display: grid;
   gap: 14px;
   padding: 8px 0 20px;
+}
+.rubric-workbench {
+  display: grid;
+  gap: 14px;
 }
 .report {
   padding: 6px 0;
