@@ -2944,10 +2944,9 @@ function goBack() {
             v-else
             secondary
             type="primary"
-            :loading="gradingActionLoading"
-            @click="startGrading"
+            @click="activeTab = 'history-grading'"
           >
-            开始批阅
+            开始按题阅卷
           </n-button>
         </div>
       </div>
@@ -3237,7 +3236,7 @@ function goBack() {
           <n-empty v-else description="导入原始答卷后即可启动扫描识别" />
         </n-tab-pane>
 
-        <n-tab-pane name="history-grading" tab="历史阅卷" display-directive="if">
+        <n-tab-pane name="history-grading" tab="按题阅卷" display-directive="show:lazy">
           <HistoryWorkspace
             v-if="detail"
             :key="projectId"
@@ -3247,7 +3246,9 @@ function goBack() {
           />
         </n-tab-pane>
 
-        <n-tab-pane name="results" tab="批阅结果">
+        <n-tab-pane name="results" tab="旧版整卷结果">
+          <n-button v-if="papers.length && !hasActiveGradingTask" tertiary
+            :loading="gradingActionLoading" @click="startGrading">开始旧版整卷批阅</n-button>
           <div
             v-if="papers.length"
             class="result-review-layout"

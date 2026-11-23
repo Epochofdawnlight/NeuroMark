@@ -24,6 +24,7 @@ export interface HistoryDraft {
   reference: string;
   material: string;
   questions: HistoryQuestion[];
+  regionsByPaper?: Record<string, Record<string, HistoryRegion[]>>;
 }
 
 export interface HistoryEndpoint {
@@ -37,9 +38,16 @@ export interface HistoryProviderSettings {
   grading: HistoryEndpoint;
 }
 
+export type HistoryProviderRole = keyof HistoryProviderSettings;
+export type HistoryEndpointInput = Pick<
+  HistoryEndpoint,
+  'baseUrl' | 'model'
+> & {
+  apiKey?: string;
+};
 export type HistoryProviderInput = Record<
-  keyof HistoryProviderSettings,
-  Pick<HistoryEndpoint, 'baseUrl' | 'model'> & { apiKey?: string }
+  HistoryProviderRole,
+  HistoryEndpointInput
 >;
 
 export interface HistoryPoint {
@@ -89,6 +97,7 @@ export interface HistoryRun {
   kind: 'trial' | 'formal';
   revision: number;
   providerRevision: number;
+  providerSignature?: string;
   providers: HistoryProviderSettings;
   draft: HistoryDraft;
   sampledPapers: number;
@@ -116,6 +125,7 @@ export interface HistorySnapshot {
   revision: number;
   draft: HistoryDraft;
   providers: HistoryProviderSettings;
+  canAdoptProviders: boolean;
   approvedTrialId?: string;
   trial?: HistoryRun;
   formal?: HistoryRun;
@@ -131,6 +141,18 @@ export interface HistoryRowRef {
 }
 
 export interface HistoryApi {
+  getDefaultProviders: () => Promise<HistoryProviderSettings>;
+  saveDefaultProvider: (
+    role: HistoryProviderRole,
+    input: HistoryEndpointInput,
+  ) => Promise<void>;
+  testDefaultProvider: (role: HistoryProviderRole) => Promise<void>;
+  adoptProviders: (projectId: string) => Promise<void>;
+  previewRegions: (
+    projectId: string,
+    paperId: string,
+    regions: HistoryRegion[],
+  ) => Promise<string[]>;
   get: (projectId: string) => Promise<HistorySnapshot>;
   getRun: (projectId: string, runId: string) => Promise<HistoryRun>;
   bindStudent: (

@@ -75,6 +75,7 @@ it('reuses OCR during rubric revision and exports the teacher-confirmed formal b
     CREATE TABLE projects (id TEXT PRIMARY KEY);
     INSERT INTO projects VALUES ('p');
     CREATE TABLE history_workspaces (project_id TEXT PRIMARY KEY, state_json TEXT NOT NULL);
+    CREATE TABLE history_provider_defaults (role TEXT PRIMARY KEY, config_json TEXT NOT NULL);
   `);
   try {
     const scan = path.join(dir, 'scan.png');
@@ -105,13 +106,16 @@ it('reuses OCR during rubric revision and exports the teacher-confirmed formal b
       getProjectById: async () => ({ id: 'p' }),
       listProjectPapers: async () => papers,
     } as unknown as ProjectService);
-    await service.saveProviders('p', {
-      recognition: {
-        baseUrl: recognition.baseUrl,
-        model: 'vision',
-        apiKey: 'fake',
-      },
-      grading: { baseUrl: grading.baseUrl, model: 'text', apiKey: 'fake' },
+    await service.saveDefaultProvider('recognition', {
+      baseUrl: recognition.baseUrl,
+      model: 'vision',
+      apiKey: 'fake',
+    });
+    expect((await service.getDefaultProviders()).grading.hasKey).toBe(false);
+    await service.saveDefaultProvider('grading', {
+      baseUrl: grading.baseUrl,
+      model: 'text',
+      apiKey: 'fake',
     });
     const draft: HistoryDraft = {
       reference: '工商业发展',
@@ -123,6 +127,13 @@ it('reuses OCR during rubric revision and exports the teacher-confirmed formal b
           maxScore: 2,
           regions: [{ page: 0, x: 0.25, y: 0, width: 0.5, height: 0.5 }],
           criteria: [{ id: '1', text: '经济发展', maxScore: 2 }],
+        },
+        {
+          id: '17(2)',
+          prompt: '另举一项经济原因',
+          maxScore: 2,
+          regions: [{ page: 0, x: 0.25, y: 0.5, width: 0.5, height: 0.5 }],
+          criteria: [{ id: '1', text: '工商业发展', maxScore: 2 }],
         },
       ],
     };
@@ -152,6 +163,13 @@ it('reuses OCR during rubric revision and exports the teacher-confirmed formal b
       '补充历史影响。',
       '',
     );
+    await service.audit(
+      'p',
+      { runId: second.id, paperId: 'p001', questionId: '17(2)' },
+      2,
+      '论证可以更充分。',
+      '',
+    );
     await service.approveTrial('p', second.id);
     await service.start('p', 'formal');
     await vi.waitFor(async () =>
@@ -177,12 +195,29 @@ it('reuses OCR during rubric revision and exports the teacher-confirmed formal b
       detail.getCell('G2').value,
       detail.getCell('H2').value,
     ]).toEqual(['2026001', 1, '请补充具体史实。']);
-    expect(workbook.getWorksheet('学生总分')?.getCell('D2').value).toBe(1);
-    expect(recognition.requests).toHaveLength(1);
+    expect(workbook.getWorksheet('学生总分')?.getCell('D2').value).toBe(3);
+    expect(recognition.requests).toHaveLength(2);
     expect(JSON.stringify(recognition.requests)).toContain(
       'data:image/png;base64,',
     );
-    expect(grading.requests).toHaveLength(3);
+    expect(grading.requests).toHaveLength(5);
+    draft.regionsByPaper = {
+      p001: {
+        '17(1)': [{ page: 0, x: 0.1, y: 0.55, width: 0.5, height: 0.4 }],
+      },
+    };
+    await service.saveDraft('p', 2, draft);
+    await service.start('p', 'trial', 1, true);
+    const changed = await trial();
+    expect(changed.rows[0].sources[0].region.y).toBe(0.55);
+    expect(changed.rows[1].sources[0].region.y).toBe(0.5);
+    expect(changed.rows[1].audit?.score).toBe(2);
+    expect(recognition.requests).toHaveLength(3);
+    expect(grading.requests).toHaveLength(6);
+    await service.start('p', 'trial', 1, true);
+    await trial();
+    expect(recognition.requests).toHaveLength(3);
+    expect(grading.requests).toHaveLength(6);
     expect(
       grading.requests.every(
         (request) =>

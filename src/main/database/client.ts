@@ -42,6 +42,11 @@ function ensureSchema(connection: Database.Database): void {
       state_json TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS history_provider_defaults (
+      role TEXT PRIMARY KEY,
+      config_json TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS paper_records (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,

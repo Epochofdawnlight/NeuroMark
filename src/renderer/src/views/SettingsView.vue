@@ -15,6 +15,7 @@ import {
 } from 'naive-ui';
 import type { LlmReasoningEffort, PromptPreset } from '@preload/contracts';
 import ScorePostProcessPresetManager from '@/components/ScorePostProcessPresetManager.vue';
+import HistoryApiSettings from '@/components/history/HistoryApiSettings.vue';
 import { useAnswerGeneratorStore } from '@/stores/answer-generator';
 import { useSettingsStore } from '@/stores/settings';
 
@@ -179,7 +180,9 @@ async function deletePreset(presetId: string) {
       </div>
     </section>
 
-    <n-card class="surface-card settings-card" title="OpenAI 兼容后端">
+    <HistoryApiSettings />
+
+    <n-card class="surface-card settings-card" title="参考答案生成与旧版整卷工具">
       <n-form label-placement="top">
         <n-form-item label="Base URL">
           <n-input

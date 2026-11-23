@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { safeStorage } from 'electron';
 import ExcelJS from 'exceljs';
@@ -8,15 +8,22 @@ import type { PaperRecord } from '@preload/contracts';
 import type {
   HistoryDraft,
   HistoryEndpoint,
+  HistoryEndpointInput,
   HistoryProviderInput,
   HistoryProviderSettings,
+  HistoryRegion,
   HistoryRow,
   HistoryRowRef,
   HistoryRun,
   HistorySnapshot,
   HistorySource,
 } from '@preload/history';
-import { buildTrialReport, validateHistoryDraft } from './historyRules';
+import {
+  buildTrialReport,
+  historyRegionsSchema,
+  regionsForQuestion,
+  validateHistoryDraft,
+} from './historyRules';
 import {
   cropHistorySource,
   gradeHistoryAnswer,
@@ -31,6 +38,8 @@ type StoredEndpoint = Omit<HistoryEndpoint, 'hasKey'> & {
   encryptedKey: string;
 };
 type Identity = { studentId: string; name: string };
+const providerRoles = ['recognition', 'grading'] as const;
+type StoredProviders = Record<Role, StoredEndpoint>;
 
 interface Workspace {
   revision: number;
@@ -72,11 +81,65 @@ function publicEndpoint(config: StoredEndpoint): HistoryEndpoint {
   };
 }
 
-function providersFor(state: Workspace): HistoryProviderSettings {
+function providersFor(providers: StoredProviders): HistoryProviderSettings {
   return {
-    recognition: publicEndpoint(state.providers.recognition),
-    grading: publicEndpoint(state.providers.grading),
+    recognition: publicEndpoint(providers.recognition),
+    grading: publicEndpoint(providers.grading),
   };
+}
+
+function parseRole(role: Role): Role {
+  if (!providerRoles.includes(role)) throw new Error('未知的 API 类型。');
+  return role;
+}
+
+function updateEndpoint(
+  input: HistoryEndpointInput,
+  previous?: StoredEndpoint,
+): StoredEndpoint {
+  const baseUrl = input.baseUrl.trim().replace(/\/+$/, '');
+  const model = input.model.trim();
+  if (!baseUrl || !model) throw new Error('请填写此 API 的地址和模型。');
+  const url = new URL(baseUrl);
+  if (
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    (url.protocol !== 'https:' &&
+      !(
+        url.protocol === 'http:' &&
+        ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+      ))
+  ) {
+    throw new Error('API 地址须为 HTTPS 或本机 HTTP，且地址中不能包含凭据。');
+  }
+  let encryptedKey = previous?.baseUrl === baseUrl ? previous.encryptedKey : '';
+  if (input.apiKey?.trim()) {
+    if (!safeStorage.isEncryptionAvailable())
+      throw new Error('系统密钥存储不可用。');
+    encryptedKey = safeStorage
+      .encryptString(input.apiKey.trim())
+      .toString('base64');
+  }
+  if (!encryptedKey)
+    throw new Error('请填写此 API 的密钥。本机服务可使用占位密钥。');
+  return { baseUrl, model, encryptedKey };
+}
+
+function providerSignature(providers: StoredProviders): string {
+  return createHash('sha256').update(JSON.stringify(providers)).digest('hex');
+}
+
+function sameProviders(
+  run: HistoryRun,
+  state: Workspace,
+  providers: StoredProviders,
+): boolean {
+  return run.providerSignature
+    ? run.providerSignature === providerSignature(providers)
+    : state.providerRevision === run.providerRevision &&
+        providerSignature(state.providers) === providerSignature(providers);
 }
 
 function connectionFor(config: StoredEndpoint): HistoryConnection {
@@ -120,21 +183,9 @@ function randomPapers(papers: PaperRecord[], count: number): PaperRecord[] {
 function buildRows(papers: PaperRecord[], draft: HistoryDraft): HistoryRow[] {
   return papers.flatMap((paper) =>
     draft.questions.map((question) => {
-      const sources = question.regions.flatMap((region): HistorySource[] => {
-        const page = paper.originalPages.find(
-          (item) => item.pageIndex === region.page,
-        );
-        return page?.scannedPath
-          ? [
-              {
-                region,
-                file: page.scannedPath,
-                version: page.scannedVersion ?? null,
-              },
-            ]
-          : [];
-      });
-      const missing = sources.length !== question.regions.length;
+      const regions = regionsForQuestion(draft, paper.id, question);
+      const sources = sourcesForRegions(paper, regions);
+      const missing = !regions.length || sources.length !== regions.length;
       return {
         paperId: paper.id,
         paperCode: paper.paperCode,
@@ -142,18 +193,167 @@ function buildRows(papers: PaperRecord[], draft: HistoryDraft): HistoryRow[] {
         sources,
         cacheKey: JSON.stringify([paper.id, question.id, sources]),
         status: missing ? 'error' : 'pending',
-        error: missing
-          ? '作答所需页面缺失或未扫描。请核对原卷与题框。'
-          : undefined,
+        error: !regions.length
+          ? '这道小题还没有作答区域。请在答题区域工作台补画。'
+          : missing
+            ? '作答所需页面缺失或未扫描。请核对原卷与题框。'
+            : undefined,
       };
     }),
   );
+}
+
+function sourcesForRegions(
+  paper: PaperRecord,
+  regions: HistoryRegion[],
+): HistorySource[] {
+  return regions.flatMap((region) => {
+    const page = paper.originalPages.find(
+      (item) => item.pageIndex === region.page,
+    );
+    return page?.scannedPath
+      ? [
+          {
+            region,
+            file: page.scannedPath,
+            version: page.scannedVersion ?? null,
+          },
+        ]
+      : [];
+  });
+}
+
+function regionCount(run: HistoryRun, row: HistoryRow): number {
+  const question = run.draft.questions.find((q) => q.id === row.questionId);
+  return question
+    ? regionsForQuestion(run.draft, row.paperId, question).length
+    : 0;
+}
+
+function reuseTrialRows(
+  rows: HistoryRow[],
+  draft: HistoryDraft,
+  prior: HistoryRun,
+): HistoryRow[] {
+  if (
+    draft.reference !== prior.draft.reference ||
+    draft.material !== prior.draft.material
+  )
+    return rows;
+  const unchanged = new Set(
+    draft.questions
+      .filter((question) => {
+        const previous = prior.draft.questions.find(
+          (item) => item.id === question.id,
+        );
+        return (
+          previous &&
+          question.prompt === previous.prompt &&
+          question.maxScore === previous.maxScore &&
+          JSON.stringify(question.criteria) ===
+            JSON.stringify(previous.criteria)
+        );
+      })
+      .map((question) => question.id),
+  );
+  const eligible = new Map(
+    prior.rows
+      .filter(
+        (row) =>
+          unchanged.has(row.questionId) &&
+          (row.status === 'scored' || row.status === 'blank'),
+      )
+      .map((row) => [row.cacheKey, row]),
+  );
+  return rows.map((row) => {
+    const previous =
+      row.status === 'pending' ? eligible.get(row.cacheKey) : undefined;
+    return previous ? structuredClone(previous) : row;
+  });
 }
 
 export class HistoryService {
   private active = new Set<string>();
 
   constructor(private projects: ProjectService) {}
+
+  private savedDefaults(): Partial<StoredProviders> {
+    const rows = getDatabase()
+      .$client.prepare(
+        'SELECT role, config_json FROM history_provider_defaults',
+      )
+      .all() as { role: Role; config_json: string }[];
+    return Object.fromEntries(
+      rows
+        .filter((row) => providerRoles.includes(row.role))
+        .map((row) => [
+          row.role,
+          JSON.parse(row.config_json) as StoredEndpoint,
+        ]),
+    );
+  }
+
+  private effectiveProviders(state: Workspace): StoredProviders {
+    return { ...state.providers, ...this.savedDefaults() };
+  }
+
+  private writeDefault(role: Role, endpoint: StoredEndpoint): void {
+    getDatabase()
+      .$client.prepare(
+        `
+      INSERT INTO history_provider_defaults (role, config_json) VALUES (?, ?)
+      ON CONFLICT(role) DO UPDATE SET config_json = excluded.config_json
+    `,
+      )
+      .run(role, JSON.stringify(endpoint));
+  }
+
+  async getDefaultProviders(): Promise<HistoryProviderSettings> {
+    return providersFor(this.effectiveProviders(emptyWorkspace()));
+  }
+
+  async saveDefaultProvider(
+    role: Role,
+    input: HistoryEndpointInput,
+  ): Promise<void> {
+    parseRole(role);
+    this.writeDefault(role, updateEndpoint(input, this.savedDefaults()[role]));
+  }
+
+  async testDefaultProvider(role: Role): Promise<void> {
+    parseRole(role);
+    const endpoint = this.effectiveProviders(emptyWorkspace())[role];
+    await testHistoryConnection(
+      connectionFor(endpoint),
+      role === 'recognition',
+    );
+  }
+
+  async adoptProviders(projectId: string): Promise<void> {
+    await this.projects.getProjectById(projectId);
+    const state = this.load(projectId);
+    const saved = this.savedDefaults();
+    for (const role of providerRoles) {
+      if (!saved[role] && state.providers[role].encryptedKey)
+        this.writeDefault(role, state.providers[role]);
+    }
+  }
+
+  async previewRegions(
+    projectId: string,
+    paperId: string,
+    input: HistoryRegion[],
+  ): Promise<string[]> {
+    const paper = (await this.projects.listProjectPapers(projectId)).find(
+      (item) => item.id === paperId,
+    );
+    if (!paper) throw new Error('找不到答题卡。');
+    const regions = historyRegionsSchema.parse(input);
+    const sources = sourcesForRegions(paper, regions);
+    if (!regions.length || sources.length !== regions.length)
+      throw new Error('请添加题框并检查所需页是否已扫描。');
+    return Promise.all(sources.map(cropHistorySource));
+  }
 
   private load(projectId: string): Workspace {
     const result = getDatabase()
@@ -196,11 +396,18 @@ export class HistoryService {
   async get(projectId: string): Promise<HistorySnapshot> {
     await this.projects.getProjectById(projectId);
     const state = this.load(projectId);
+    const saved = this.savedDefaults();
+    const providers = { ...state.providers, ...saved };
     return {
       revision: state.revision,
       draft: state.draft,
-      providers: providersFor(state),
-      approvedTrialId: state.approvedTrialId,
+      providers: providersFor(providers),
+      canAdoptProviders: providerRoles.some(
+        (role) => !saved[role] && state.providers[role].encryptedKey,
+      ),
+      approvedTrialId: this.approved(state, providers)
+        ? state.approvedTrialId
+        : undefined,
       identities: state.identities,
       trial: this.shownRun(projectId, state.trial),
       formal: this.shownRun(projectId, state.formal),
@@ -252,41 +459,11 @@ export class HistoryService {
     this.ensureIdle(projectId);
     const state = this.load(projectId);
     const before = JSON.stringify(state.providers);
-    for (const role of ['recognition', 'grading'] as const) {
-      const endpoint = input[role];
-      const baseUrl = endpoint.baseUrl.trim().replace(/\/+$/, '');
-      const model = endpoint.model.trim();
-      if (!baseUrl || !model)
-        throw new Error('两套 API 都需要填写地址和模型。');
-      const url = new URL(baseUrl);
-      if (
-        url.username ||
-        url.password ||
-        url.search ||
-        url.hash ||
-        (url.protocol !== 'https:' &&
-          !(
-            url.protocol === 'http:' &&
-            ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
-          ))
-      ) {
-        throw new Error(
-          'API 地址须为 HTTPS 或本机 HTTP，且地址中不能包含凭据。',
-        );
-      }
-      const previous = state.providers[role];
-      let encryptedKey =
-        previous?.baseUrl === baseUrl ? previous.encryptedKey : '';
-      if (endpoint.apiKey?.trim()) {
-        if (!safeStorage.isEncryptionAvailable())
-          throw new Error('系统密钥存储不可用。');
-        encryptedKey = safeStorage
-          .encryptString(endpoint.apiKey.trim())
-          .toString('base64');
-      }
-      if (!encryptedKey)
-        throw new Error('请为各 API 设置自己的密钥。本机服务可使用占位密钥。');
-      state.providers[role] = { baseUrl, model, encryptedKey };
+    for (const role of providerRoles) {
+      state.providers[role] = updateEndpoint(
+        input[role],
+        state.providers[role],
+      );
     }
     if (before !== JSON.stringify(state.providers)) {
       state.providerRevision += 1;
@@ -297,10 +474,9 @@ export class HistoryService {
 
   async testProvider(projectId: string, role: Role): Promise<void> {
     await this.projects.getProjectById(projectId);
-    if (role !== 'recognition' && role !== 'grading')
-      throw new Error('未知的 API 类型。');
+    parseRole(role);
     await testHistoryConnection(
-      connectionFor(this.load(projectId).providers[role]),
+      connectionFor(this.effectiveProviders(this.load(projectId))[role]),
       role === 'recognition',
     );
   }
@@ -337,9 +513,10 @@ export class HistoryService {
       const papers = await this.projects.listProjectPapers(projectId);
       const state = this.load(projectId);
       const draft = validateHistoryDraft(state.draft);
-      const connections = this.connections(state);
+      const providers = this.effectiveProviders(state);
+      const connections = this.connections(providers);
       if (!papers.length) throw new Error('项目中没有答卷。');
-      if (kind === 'formal' && !this.approved(state))
+      if (kind === 'formal' && !this.approved(state, providers))
         throw new Error('请先通过当前版本的教师试阅。');
       if (!Number.isInteger(sampleSize) || sampleSize < 1)
         throw new Error('试阅份数必须为正整数。');
@@ -354,20 +531,28 @@ export class HistoryService {
       if (kind === 'trial' && repeat && selected.length !== prior.size) {
         throw new Error('原样本中的答卷已移除，请重新随机抽取。');
       }
+      const rows = buildRows(selected, draft);
+      const previous = state[kind];
       const run: HistoryRun = {
         id: randomUUID(),
         kind,
         revision: state.revision,
         providerRevision: state.providerRevision,
-        providers: providersFor(state),
+        providerSignature: providerSignature(providers),
+        providers: providersFor(providers),
         draft,
         sampledPapers: selected.length,
         totalPapers: papers.length,
-        rows: buildRows(selected, draft),
+        rows:
+          kind === 'trial' &&
+          repeat &&
+          previous &&
+          sameProviders(previous, state, providers)
+            ? reuseTrialRows(rows, draft, previous)
+            : rows,
         status: 'running',
         createdAt: new Date().toISOString(),
       };
-      const previous = state[kind];
       if (previous) state.pastRuns.unshift(this.shownRun('', previous)!);
       state[kind] = run;
       if (kind === 'trial') state.approvedTrialId = undefined;
@@ -379,10 +564,10 @@ export class HistoryService {
     }
   }
 
-  private connections(state: Workspace) {
+  private connections(providers: StoredProviders) {
     return {
-      recognition: connectionFor(state.providers.recognition),
-      grading: connectionFor(state.providers.grading),
+      recognition: connectionFor(providers.recognition),
+      grading: connectionFor(providers.grading),
     };
   }
 
@@ -391,21 +576,21 @@ export class HistoryService {
     this.ensureIdle(projectId);
     const state = this.load(projectId);
     const run = findRun(state, runId);
+    const providers = this.effectiveProviders(state);
     if (
       state[run.kind]?.id !== run.id ||
       run.status === 'confirmed' ||
-      state.providerRevision !== run.providerRevision
+      !sameProviders(run, state, providers)
     ) {
       throw new Error('请使用原模型设置重试当前批次，或重新开始试阅。');
     }
-    const connections = this.connections(state);
+    const connections = this.connections(providers);
     for (const row of run.rows) {
       if (
         row.status === 'error' &&
         !row.audit &&
-        row.sources.length ===
-          run.draft.questions.find((q) => q.id === row.questionId)?.regions
-            .length
+        row.sources.length > 0 &&
+        row.sources.length === regionCount(run, row)
       )
         row.status = 'pending';
     }
@@ -512,16 +697,14 @@ export class HistoryService {
     this.ensureIdle(projectId);
     const state = this.load(projectId);
     const { run, row } = this.editableRow(state, ref);
-    if (state.providerRevision !== run.providerRevision) {
+    const providers = this.effectiveProviders(state);
+    if (!sameProviders(run, state, providers)) {
       throw new Error('评分配置已经变更，请重新试阅。');
     }
-    if (
-      row.sources.length !==
-      run.draft.questions.find((q) => q.id === row.questionId)?.regions.length
-    ) {
+    if (!row.sources.length || row.sources.length !== regionCount(run, row)) {
       throw new Error('存在缺失页，无法确认转录。请先修复扫描件。');
     }
-    const grading = connectionFor(state.providers.grading);
+    const grading = connectionFor(providers.grading);
     const value = text.trim();
     const transcript: HistoryTranscript = value
       ? { status: 'readable', text: value }
@@ -588,12 +771,12 @@ export class HistoryService {
     this.write(projectId, state);
   }
 
-  private approved(state: Workspace): boolean {
+  private approved(state: Workspace, providers: StoredProviders): boolean {
     return Boolean(
       state.approvedTrialId &&
       state.trial?.id === state.approvedTrialId &&
       state.trial.revision === state.revision &&
-      state.trial.providerRevision === state.providerRevision,
+      sameProviders(state.trial, state, providers),
     );
   }
 
@@ -607,7 +790,7 @@ export class HistoryService {
       trial.id !== runId ||
       trial.revision !== state.revision ||
       trial.status !== 'review' ||
-      trial.providerRevision !== state.providerRevision
+      !sameProviders(trial, state, this.effectiveProviders(state))
     ) {
       throw new Error('请对当前细则和模型配置重新试阅。');
     }

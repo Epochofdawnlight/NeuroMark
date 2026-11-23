@@ -18,6 +18,11 @@ export function registerHistoryIpc(projects: ProjectService): void {
     );
   }
   handle('get', 'get');
+  handle('get-default-providers', 'getDefaultProviders');
+  handle('save-default-provider', 'saveDefaultProvider');
+  handle('test-default-provider', 'testDefaultProvider');
+  handle('adopt-providers', 'adoptProviders');
+  handle('preview-regions', 'previewRegions');
   handle('get-run', 'getRun');
   handle('bind-student', 'bindStudent');
   handle('save-providers', 'saveProviders');

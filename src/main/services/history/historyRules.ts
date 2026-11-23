@@ -4,6 +4,7 @@ import type {
   HistoryGrade,
   HistoryQuestion,
   HistoryReport,
+  HistoryRegion,
   HistoryRow,
 } from '@preload/history';
 
@@ -17,15 +18,20 @@ const regionSchema = z
   })
   .refine((r) => r.x + r.width <= 1.000001 && r.y + r.height <= 1.000001);
 
+export const historyRegionsSchema = z.array(regionSchema).max(100);
+
 const draftSchema = z.object({
   reference: z.string().trim(),
   material: z.string().trim(),
+  regionsByPaper: z
+    .record(z.string(), z.record(z.string(), historyRegionsSchema))
+    .optional(),
   questions: z.array(
     z.object({
       id: z.string().trim().min(1),
       prompt: z.string().trim().min(1),
       maxScore: z.number().positive(),
-      regions: z.array(regionSchema),
+      regions: historyRegionsSchema,
       criteria: z.array(
         z.object({
           id: z.string().trim().min(1),
@@ -56,8 +62,8 @@ export function validateHistoryDraft(input: HistoryDraft): HistoryDraft {
   if (ids.size !== draft.questions.length)
     throw new Error('小题题号必须唯一。');
   for (const q of draft.questions) {
-    if (!q.regions.length || !q.criteria.length) {
-      throw new Error(`${q.id} 需要至少一个作答区域和一条评分细则。`);
+    if (!q.criteria.length) {
+      throw new Error(`${q.id} 需要至少一条评分细则。`);
     }
     const pointIds = new Set(q.criteria.map((c) => c.id));
     const total = q.criteria.reduce((sum, c) => sum + c.maxScore, 0);
@@ -70,7 +76,24 @@ export function validateHistoryDraft(input: HistoryDraft): HistoryDraft {
       );
     }
   }
+  for (const regions of Object.values(draft.regionsByPaper ?? {})) {
+    const invalid = Object.keys(regions).find((id) => !ids.has(id));
+    if (invalid) throw new Error(`答题区域引用了未定义的题号 ${invalid}。`);
+  }
   return draft;
+}
+
+export function regionsForQuestion(
+  draft: HistoryDraft,
+  paperId: string,
+  question: HistoryQuestion,
+): HistoryRegion[] {
+  const byPaper = draft.regionsByPaper;
+  const overrides =
+    byPaper && Object.hasOwn(byPaper, paperId) ? byPaper[paperId] : undefined;
+  return overrides && Object.hasOwn(overrides, question.id)
+    ? overrides[question.id]
+    : question.regions;
 }
 
 function normalizeEvidence(text: string): string {

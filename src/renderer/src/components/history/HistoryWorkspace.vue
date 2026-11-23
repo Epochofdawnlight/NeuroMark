@@ -4,7 +4,6 @@ import {
   NAlert,
   NButton,
   NCard,
-  NInput,
   NInputNumber,
   NPopconfirm,
   NSelect,
@@ -15,14 +14,14 @@ import {
 import type { PaperRecord } from '@preload/contracts';
 import type {
   HistoryDraft,
-  HistoryProviderInput,
-  HistoryProviderSettings,
   HistoryRowRef,
   HistoryRun,
   HistorySnapshot,
 } from '@preload/history';
 import HistorySetup from './HistorySetup.vue';
 import HistoryReview from './HistoryReview.vue';
+import HistoryRegions from './HistoryRegions.vue';
+import { useRouter } from 'vue-router';
 
 const props = defineProps<{
   projectId: string;
@@ -30,16 +29,13 @@ const props = defineProps<{
   referenceAnswer: string;
 }>();
 const message = useMessage();
+const router = useRouter();
 const api = window.neuromark.history;
 const snapshot = ref<HistorySnapshot>();
 const draft = ref<HistoryDraft>({ reference: '', material: '', questions: [] });
 const draftRevision = ref(0);
-const endpoints = ref<HistoryProviderInput>({
-  recognition: { baseUrl: '', model: '', apiKey: '' },
-  grading: { baseUrl: '', model: '', apiKey: '' },
-});
 const sampleSize = ref<number | null>(10);
-const view = ref<'setup' | 'trial' | 'formal' | 'archive'>('setup');
+const view = ref<'setup' | 'regions' | 'trial' | 'formal' | 'archive'>('setup');
 const archived = ref<HistoryRun>();
 const busy = ref(false);
 const loadingError = ref('');
@@ -65,7 +61,9 @@ const activeRun = computed(() =>
     ? snapshot.value?.trial
     : view.value === 'formal'
       ? snapshot.value?.formal
-      : archived.value,
+      : view.value === 'archive'
+        ? archived.value
+        : undefined,
 );
 const statusLabel: Record<HistoryRun['status'], string> = {
   running: '批阅中',
@@ -83,21 +81,10 @@ async function refresh(reloadDraft = false) {
       draft.value = structuredClone(current.draft);
       draftRevision.value = current.revision;
     }
-    if (!snapshot.value) syncEndpoints(current.providers);
     snapshot.value = current;
     loadingError.value = '';
   } catch (error) {
     if (requestId === refreshId) loadingError.value = String(error);
-  }
-}
-
-function syncEndpoints(settings: HistoryProviderSettings) {
-  for (const role of roles) {
-    endpoints.value[role] = {
-      baseUrl: settings[role].baseUrl,
-      model: settings[role].model,
-      apiKey: '',
-    };
   }
 }
 
@@ -121,14 +108,6 @@ async function act(
   } finally {
     busy.value = false;
   }
-}
-
-async function saveProviders() {
-  await act(async () => {
-    await api.saveProviders(props.projectId, serialized(endpoints.value));
-    await refresh();
-    if (snapshot.value) syncEndpoints(snapshot.value.providers);
-  }, '模型配置已保存');
 }
 
 async function start(kind: 'trial' | 'formal', repeat = false) {
@@ -185,6 +164,11 @@ onBeforeUnmount(() => {
           >准备与细则</n-button
         >
         <n-button
+          :type="view === 'regions' ? 'primary' : 'default'"
+          @click="view = 'regions'"
+          >答题区域</n-button
+        >
+        <n-button
           :type="view === 'trial' ? 'primary' : 'default'"
           @click="view = 'trial'"
           >试阅与抽检</n-button
@@ -200,92 +184,80 @@ onBeforeUnmount(() => {
           >历次批阅</n-button
         >
       </n-space>
+      <n-space align="center">
+        <span
+          >OCR ·
+          {{
+            snapshot.providers.recognition.hasKey
+              ? snapshot.providers.recognition.model
+              : '待配置'
+          }}</span
+        >
+        <span
+          >评分 ·
+          {{
+            snapshot.providers.grading.hasKey
+              ? snapshot.providers.grading.model
+              : '待配置'
+          }}</span
+        >
+        <n-button size="small" text @click="router.push({ name: 'settings' })"
+          >打开模型设置</n-button
+        >
+        <n-button
+          v-if="snapshot.canAdoptProviders"
+          size="small"
+          text
+          :disabled="busy"
+          @click="
+            act(
+              () => api.adoptProviders(projectId),
+              '已将未配置的模型迁移到全局设置',
+            )
+          "
+          >迁移项目中已保存的模型</n-button
+        >
+      </n-space>
       <template v-if="view === 'setup'">
-        <n-card size="small" title="模型 API 设置">
-          <div class="endpoints">
-            <section v-for="role in roles" :key="role">
-              <h3>
-                {{ role === 'recognition' ? '图像识别 API' : '批阅 API' }}
-              </h3>
-              <label
-                >Base URL
-                <n-input
-                  v-model:value="endpoints[role].baseUrl"
-                  placeholder="OpenAI 兼容地址，通常以 /v1 结尾"
-                  :disabled="busy || running"
-              /></label>
-              <label
-                >模型
-                <n-input
-                  v-model:value="endpoints[role].model"
-                  :disabled="busy || running"
-              /></label>
-              <label
-                >API Key
-                <n-input
-                  v-model:value="endpoints[role].apiKey"
-                  type="password"
-                  :placeholder="
-                    snapshot.providers[role].hasKey
-                      ? '已保存，留空沿用'
-                      : '填写此接口的密钥'
-                  "
-                  :disabled="busy || running"
-              /></label>
-              <n-button
-                size="small"
-                :disabled="busy || running || !snapshot.providers[role].hasKey"
-                @click="
-                  act(
-                    () => api.testProvider(projectId, role),
-                    '已保存的接口测试通过',
-                  )
-                "
-                >测试已保存配置</n-button
-              >
-            </section>
-          </div>
-          <n-button
-            size="small"
-            type="primary"
-            :disabled="busy || running"
-            @click="saveProviders"
-            >保存 API 设置</n-button
-          >
-        </n-card>
         <HistorySetup
           v-model="draft"
-          :papers="papers"
           :reference-answer="referenceAnswer"
           :disabled="busy || running"
         />
-        <n-space align="center">
-          <n-button
-            type="primary"
-            :disabled="busy || running || !dirty"
-            @click="
-              act(
-                () =>
-                  api.saveDraft(projectId, draftRevision, serialized(draft)),
-                '评分细则已保存',
-                true,
-              )
-            "
-            >保存当前细则</n-button
-          >
-          <span
-            >细则版本 {{ snapshot.revision
-            }}{{ dirty ? ' · 有未保存修改' : '' }}</span
-          >
-          <n-button
-            v-if="draftRevision !== snapshot.revision"
-            text
-            :disabled="busy"
-            @click="refresh(true)"
-            >载入最新版</n-button
-          >
-        </n-space>
       </template>
+      <HistoryRegions
+        v-if="view === 'regions'"
+        v-model="draft"
+        :project-id="projectId"
+        :papers="papers"
+        :disabled="busy || running"
+      />
+      <n-space v-if="view === 'setup' || view === 'regions'" align="center">
+        <n-button
+          type="primary"
+          :disabled="busy || running || !dirty"
+          @click="
+            act(
+              () => api.saveDraft(projectId, draftRevision, serialized(draft)),
+              '细则与答题区域已保存',
+              true,
+            )
+          "
+        >
+          保存细则与题框
+        </n-button>
+        <span
+          >版本 {{ snapshot.revision
+          }}{{ dirty ? ' · 有未保存修改' : '' }}</span
+        >
+        <n-button
+          v-if="draftRevision !== snapshot.revision"
+          text
+          :disabled="busy"
+          @click="refresh(true)"
+          >载入最新版</n-button
+        >
+      </n-space>
 
       <n-card v-if="view === 'trial'" size="small" title="试阅">
         <n-space align="center">
@@ -507,21 +479,6 @@ onBeforeUnmount(() => {
   gap: 14px;
   padding: 8px 0 20px;
 }
-.endpoints {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
-  margin-bottom: 12px;
-}
-.endpoints section {
-  display: grid;
-  gap: 8px;
-  align-content: start;
-}
-h3 {
-  font-size: 1em;
-  margin: 0;
-}
 .report {
   padding: 6px 0;
 }
@@ -531,10 +488,5 @@ h3 {
 .example {
   padding: 8px 0;
   white-space: pre-wrap;
-}
-@media (max-width: 640px) {
-  .endpoints {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 </style>

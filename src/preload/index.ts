@@ -9,19 +9,35 @@ import type {
 
 const api: NeuromarkApi = {
   history: {
+    getDefaultProviders: () =>
+      ipcRenderer.invoke('history:get-default-providers'),
+    saveDefaultProvider: (...args) =>
+      ipcRenderer.invoke('history:save-default-provider', ...args),
+    testDefaultProvider: (...args) =>
+      ipcRenderer.invoke('history:test-default-provider', ...args),
+    adoptProviders: (...args) =>
+      ipcRenderer.invoke('history:adopt-providers', ...args),
+    previewRegions: (...args) =>
+      ipcRenderer.invoke('history:preview-regions', ...args),
     get: (...args) => ipcRenderer.invoke('history:get', ...args),
     getRun: (...args) => ipcRenderer.invoke('history:get-run', ...args),
-    bindStudent: (...args) => ipcRenderer.invoke('history:bind-student', ...args),
-    saveProviders: (...args) => ipcRenderer.invoke('history:save-providers', ...args),
-    testProvider: (...args) => ipcRenderer.invoke('history:test-provider', ...args),
+    bindStudent: (...args) =>
+      ipcRenderer.invoke('history:bind-student', ...args),
+    saveProviders: (...args) =>
+      ipcRenderer.invoke('history:save-providers', ...args),
+    testProvider: (...args) =>
+      ipcRenderer.invoke('history:test-provider', ...args),
     saveDraft: (...args) => ipcRenderer.invoke('history:save-draft', ...args),
     start: (...args) => ipcRenderer.invoke('history:start', ...args),
     resume: (...args) => ipcRenderer.invoke('history:resume', ...args),
     preview: (...args) => ipcRenderer.invoke('history:preview', ...args),
-    correctTranscript: (...args) => ipcRenderer.invoke('history:correct-transcript', ...args),
+    correctTranscript: (...args) =>
+      ipcRenderer.invoke('history:correct-transcript', ...args),
     audit: (...args) => ipcRenderer.invoke('history:audit', ...args),
-    approveTrial: (...args) => ipcRenderer.invoke('history:approve-trial', ...args),
-    confirmFormal: (...args) => ipcRenderer.invoke('history:confirm-formal', ...args),
+    approveTrial: (...args) =>
+      ipcRenderer.invoke('history:approve-trial', ...args),
+    confirmFormal: (...args) =>
+      ipcRenderer.invoke('history:confirm-formal', ...args),
     export: (...args) => ipcRenderer.invoke('history:export', ...args),
   },
   app: {
@@ -197,7 +213,10 @@ const api: NeuromarkApi = {
     execute: (projectId, input) =>
       ipcRenderer.invoke('score-post-process:execute', projectId, input),
     getAiScriptSnapshot: (projectId) =>
-      ipcRenderer.invoke('score-post-process:get-ai-script-snapshot', projectId),
+      ipcRenderer.invoke(
+        'score-post-process:get-ai-script-snapshot',
+        projectId,
+      ),
     startAiScriptGeneration: (projectId, input) =>
       ipcRenderer.invoke(
         'score-post-process:start-ai-script-generation',
