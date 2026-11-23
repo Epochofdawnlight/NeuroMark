@@ -33,7 +33,7 @@
 </p>
 
 <p>
-  NeuroMark 试图把 <strong>答卷导入、扫描矫正、参考答案生成、批量批阅、结果复核、导出归档</strong>
+  NeuroMark 试图把 <strong>答卷导入、整页准备、参考答案生成、批量批阅、结果复核、导出归档</strong>
   放进一个真正可用的桌面工作流里。<br />
   这是一个正在开源中的项目，也希望逐步成长为一个欢迎教师、开发者、OCR/LLM 工程师共同参与的社区项目。
 </p>
@@ -55,7 +55,7 @@
 很多“AI 阅卷”产品只停留在接口演示，缺少真实场景需要的工程闭环。NeuroMark 更关注下面这些问题：
 
 - 如何把教师手里的原始答卷图片整理成可持续追踪的项目目录。
-- 如何在本地完成扫描矫正、任务编排、结果缓存，而不是每次都从零开始。
+- 如何在本地准备整页图、编排任务并复用结果。
 - 如何把参考答案、评分细则、批阅结果和人工复核放在同一工作台里。
 - 如何让 LLM 参与批改，但不牺牲可追踪性、可导出性和后续维护性。
 
@@ -65,8 +65,8 @@
 
 - `本地优先工作流`
   项目数据、答卷图片、参考答案、结果导出都落在本地目录中，状态由 SQLite 管理，便于长期归档和二次处理。
-- `原生扫描模块`
-  内置 C++/OpenCV 扫描能力，可对答卷图片进行文档检测、矫正、调试预览与后处理。
+- `整页答卷`
+  使用干净的整页图片或扫描 PDF，统一转成整页 PNG，保留纸张边缘和填涂。
 - `批量后台任务`
   扫描、批阅、参考答案生成都以后台任务方式运行，切换页面不会中断流程。
 - `参考答案生成`
@@ -98,7 +98,7 @@
 
 ```mermaid
 flowchart LR
-  A["导入答卷图片"] --> B["原生扫描与矫正"]
+  A["导入答卷图片"] --> B["准备整页答卷"]
   B --> C["项目工作台"]
   C --> D["参考答案 / Rubric"]
   D --> E["LLM 批量批阅"]
@@ -127,7 +127,6 @@ flowchart LR
 | UI | Vue 3 + Vue Router + Pinia + Naive UI |
 | Language | TypeScript |
 | Local Storage | SQLite + Drizzle ORM |
-| Native Scanning | C++ addon + OpenCV + ONNX |
 | Image Processing | Sharp |
 | LLM Access | OpenAI SDK |
 | Testing | Vitest + Playwright |
@@ -139,7 +138,7 @@ flowchart LR
 ├─ src/main/                  # Electron main process, services, IPC, database
 ├─ src/preload/               # Preload bridge and typed contracts
 ├─ src/renderer/              # Vue renderer app
-├─ src-native/scancpp/        # Native scanning module and model assets
+├─ src-native/scancpp/        # 旧版扫描源码，默认构建不使用
 ├─ scripts/                   # Build and CI helper scripts
 ├─ tests/                     # Automated tests
 └─ docs/images/               # README screenshots
@@ -152,8 +151,7 @@ NeuroMark 为每个项目创建独立目录，便于归档、迁移和人工检�
 ```text
 your-project/
 ├─ originals/                 # 原始答卷图片
-├─ scanned/                   # 扫描矫正后的图片
-├─ scan-debug/                # 扫描调试产物
+├─ scanned/                   # 整页 PNG 和旧批次引用的扫描件
 ├─ reference-answer/          # 参考答案与评分细则
 ├─ results/                   # 批阅结果
 ├─ exports/                   # 导出文件
@@ -172,7 +170,7 @@ your-project/
 
 1. 在 `全局设置` 中填写模型后端、模型名和 API Key。
 2. 创建一个项目目录。
-3. 导入答卷图片并执行扫描。
+3. 导入干净的整页答卷图片或扫描 PDF。
 4. 准备或生成参考答案。
 5. 发起批阅并在项目详情中复核结果。
 

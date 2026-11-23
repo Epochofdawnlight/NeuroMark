@@ -38,9 +38,6 @@ export interface ProjectSettings {
   gradingConcurrency: number;
   drawRegions: boolean;
   defaultImageDetail: ImageDetailLevel;
-  enableScanPostProcess: boolean;
-  skipScanProcessing: boolean;
-  scanMarginRatio: number;
   studentRoster: StudentRosterData | null;
 }
 
@@ -64,20 +61,12 @@ export interface ProjectMeta {
   settings: ProjectSettings;
 }
 
-export interface CornerPoint {
-  x: number;
-  y: number;
-}
-
 export interface PaperPage {
   pageIndex: number;
   originalPath: string;
   originalVersion?: number;
   scannedPath?: string;
   scannedVersion?: number;
-  debugPreviewPath?: string;
-  debugPreviewVersion?: number;
-  corners?: CornerPoint[];
 }
 
 export interface PaperRecord {
@@ -221,7 +210,11 @@ export interface ScorePostProcessProjectContext {
   rootPath: string;
   referenceAnswerVersion: number;
   stats: ProjectStats;
-  settings: ProjectSettings;
+  settings: ProjectSettings & {
+    enableScanPostProcess: boolean;
+    skipScanProcessing: boolean;
+    scanMarginRatio: number;
+  };
 }
 
 export interface ScorePostProcessPaperQuestion {
@@ -655,9 +648,6 @@ export interface CreateProjectInput {
   gradingConcurrency?: number;
   drawRegions?: boolean;
   defaultImageDetail?: ImageDetailLevel;
-  enableScanPostProcess?: boolean;
-  skipScanProcessing?: boolean;
-  scanMarginRatio?: number;
 }
 
 export interface CreateProjectValidationResult {

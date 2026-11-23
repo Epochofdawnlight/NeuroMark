@@ -11,15 +11,6 @@ asarUnpack:
   - node_modules/@img/sharp-*/**
   - node_modules/@img/sharp-libvips-*/**
   - node_modules/@napi-rs/canvas*/**
-extraResources:
-  - from: build/native
-    to: native
-    filter:
-      - '**/*'
-  - from: src-native/scancpp/models
-    to: models
-    filter:
-      - '*.onnx'
 mac:
   category: public.app-category.education
   artifactName: NeuroMark-${version}-macos-${arch}.${ext}
@@ -29,6 +20,11 @@ win:
   artifactName: NeuroMark-${version}-windows-${arch}-setup.${ext}
   target:
     - nsis
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
 linux:
   artifactName: NeuroMark-${version}-linux-${arch}.${ext}
   target:

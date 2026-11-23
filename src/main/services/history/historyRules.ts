@@ -48,6 +48,7 @@ export const rubricProposalSchema = z.object({
 
 const draftSchema = z.object({
   phase: z.enum(['catalog', 'regions', 'rubric', 'ready']).optional(),
+  fullPageRegionsConfirmed: z.boolean().optional(),
   reference: z.string().trim(),
   material: z.string().trim(),
   rubricIssues: z.array(z.string()).optional(),

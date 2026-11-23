@@ -9,9 +9,6 @@ const createProjectSchema = z.object({
   gradingConcurrency: z.number().int().min(1).optional(),
   drawRegions: z.boolean().optional(),
   defaultImageDetail: z.enum(['low', 'high', 'auto']).optional(),
-  enableScanPostProcess: z.boolean().optional(),
-  skipScanProcessing: z.boolean().optional(),
-  scanMarginRatio: z.number().finite().min(1).optional(),
 });
 
 const projectNameSchema = z.string().trim().min(1);
@@ -20,9 +17,6 @@ const projectSettingsSchema = z.object({
   gradingConcurrency: z.number().int().min(1),
   drawRegions: z.boolean(),
   defaultImageDetail: z.enum(['low', 'high', 'auto']),
-  enableScanPostProcess: z.boolean(),
-  skipScanProcessing: z.boolean(),
-  scanMarginRatio: z.number().finite().min(1),
   studentRoster: z
     .object({
       rawText: z.string(),

@@ -15,7 +15,7 @@ const resources = path.resolve(resourcesArg);
 const stage = path.resolve(stageArg);
 const referenceApp = path.join(resources, 'app');
 const targetApp = path.join(stage, 'resources', 'app');
-const version = '1.3.0';
+const version = '1.4.0';
 const appId = 'io.github.epochofdawnlight.historygrading';
 if (fs.existsSync(stage))
   throw new Error('Choose an empty, newly named staging directory.');
@@ -83,11 +83,6 @@ for (const entry of fs.readdirSync(runtime, { withFileTypes: true })) {
   }
 }
 fs.copyFileSync(executable, path.join(stage, 'NeuroMark.exe'));
-for (const name of ['native', 'models']) {
-  fs.cpSync(path.join(resources, name), path.join(stage, 'resources', name), {
-    recursive: true,
-  });
-}
 fs.copyFileSync(
   path.join(project, 'LICENSE'),
   path.join(stage, 'resources', 'LICENSE-NeuroMark.txt'),
@@ -147,6 +142,33 @@ fs.writeFileSync(
   mainSource
     .replaceAll('"cn.bit-helper.neuromark"', JSON.stringify(appId))
     .replace('"NeuroMark Projects"', '"历史阅卷项目"'),
+);
+// Use the same runtime filenames for collision checks and uninstall.
+const managedFiles = [
+  ...fs
+    .readdirSync(stage, { withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => entry.name),
+  ...fs
+    .readdirSync(path.join(stage, 'locales'))
+    .map((name) => `locales\\${name}`),
+  'resources\\LICENSE-NeuroMark.txt',
+];
+fs.writeFileSync(
+  `${stage}.nsh`,
+  [
+    '!macro CheckRuntimeCollisions',
+    ...managedFiles.map(
+      (name) => `  IfFileExists "$INSTDIR\\${name}" target_collision`,
+    ),
+    '!macroend',
+    '!macro RemoveRuntimeFiles',
+    ...managedFiles.flatMap((name) => [
+      `  IfFileExists "$INSTDIR\\${name}" 0 +2`,
+      `  Delete "$INSTDIR\\${name}"`,
+    ]),
+    '!macroend',
+  ].join('\n') + '\n',
 );
 console.log(
   `Staged NeuroMark ${version} with ${included.size} Electron runtime packages.`,

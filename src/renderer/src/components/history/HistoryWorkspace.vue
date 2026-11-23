@@ -47,6 +47,11 @@ const hasChoice = computed(() =>
 const hasWritten = computed(() =>
   draft.value.questions.some((item) => item.kind !== 'choice'),
 );
+const hasPreparedPage = computed(() =>
+  props.papers.some((paper) =>
+    paper.originalPages.some((page) => page.scannedPath),
+  ),
+);
 const steps = [
   { id: 'catalog', title: '上传与识别' },
   { id: 'regions', title: '切割答题卡' },
@@ -279,6 +284,9 @@ onBeforeUnmount(() => {
         @confirmed="(next) => savePhase(next, 'regions', '题号已确认')"
       />
       <template v-if="view === 'regions'">
+        <n-alert v-if="snapshot.needsRegionReview" type="info">
+          项目已改用整页坐标。请先在项目顶部准备整页答卷，再核对已有题框和选择题填涂区。
+        </n-alert>
         <n-space v-if="hasChoice && hasWritten">
           <n-button
             :type="regionView === 'written' ? 'primary' : 'default'"
@@ -306,9 +314,13 @@ onBeforeUnmount(() => {
         />
         <n-button
           type="primary"
-          :disabled="busy || running"
+          :disabled="busy || running || !hasPreparedPage"
           @click="
-            savePhase({ ...draft, phase: 'rubric' }, 'rubric', '答题区域已确认')
+            savePhase(
+              { ...draft, phase: 'rubric', fullPageRegionsConfirmed: true },
+              'rubric',
+              '答题区域已确认',
+            )
           "
           >确认切题，进入材料与细则</n-button
         >

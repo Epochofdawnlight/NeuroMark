@@ -318,7 +318,7 @@ function buildPaperDebugMetadata(input: {
         pageIndex: page.pageIndex,
         originalPath: page.originalPath,
         scannedPath: page.scannedPath ?? null,
-        debugPreviewPath: page.debugPreviewPath ?? null,
+        debugPreviewPath: null,
       })),
     },
     grading: {

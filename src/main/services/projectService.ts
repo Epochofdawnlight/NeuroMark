@@ -67,9 +67,6 @@ const DEFAULT_PROJECT_SETTINGS: ProjectSettings = {
   gradingConcurrency: 1,
   drawRegions: false,
   defaultImageDetail: 'high',
-  enableScanPostProcess: true,
-  skipScanProcessing: false,
-  scanMarginRatio: 1,
   studentRoster: null,
 };
 
@@ -154,14 +151,6 @@ function normalizeStudentRoster(
   };
 }
 
-function normalizeScanMarginRatio(value: number | null | undefined): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return DEFAULT_PROJECT_SETTINGS.scanMarginRatio;
-  }
-
-  return Math.max(1, value);
-}
-
 function createEmptyStats(): ProjectStats {
   return {
     importedPaperCount: 0,
@@ -206,13 +195,6 @@ function normalizeProjectSettings(
     defaultImageDetail:
       settings?.defaultImageDetail ??
       DEFAULT_PROJECT_SETTINGS.defaultImageDetail,
-    enableScanPostProcess:
-      settings?.enableScanPostProcess ??
-      DEFAULT_PROJECT_SETTINGS.enableScanPostProcess,
-    skipScanProcessing:
-      settings?.skipScanProcessing ??
-      DEFAULT_PROJECT_SETTINGS.skipScanProcessing,
-    scanMarginRatio: normalizeScanMarginRatio(settings?.scanMarginRatio),
     studentRoster: normalizeStudentRoster(settings?.studentRoster),
   };
 }
@@ -249,7 +231,6 @@ async function ensureProjectDirectories(rootPath: string): Promise<void> {
   await Promise.all([
     fs.ensureDir(structure.originalsDir),
     fs.ensureDir(structure.scannedDir),
-    fs.ensureDir(structure.scanDebugDir),
     fs.ensureDir(structure.referenceDir),
     fs.ensureDir(structure.resultsDir),
     fs.ensureDir(structure.exportsDir),
@@ -543,26 +524,18 @@ interface BatchFinalResultUpdate {
   options?: SaveFinalResultOptions;
 }
 
-function getPaperPageAssetPaths(
+function getFullPagePath(
   rootPath: string,
   paperCode: string,
   originalPath: string,
 ) {
   const structure = getProjectStructure(rootPath);
   const baseName = getFileNameWithoutExtension(originalPath);
-  return {
-    scannedPath: path.join(structure.scannedDir, paperCode, `${baseName}.png`),
-    debugPreviewPath: path.join(
-      structure.scanDebugDir,
-      paperCode,
-      `${baseName}_debug.jpg`,
-    ),
-    cornersPath: path.join(
-      structure.scanDebugDir,
-      paperCode,
-      `${baseName}.json`,
-    ),
-  };
+  return path.join(
+    structure.scannedDir,
+    paperCode,
+    `${baseName}.full-page.png`,
+  );
 }
 
 function extractPaperCode(stem: string): string {
@@ -1088,7 +1061,9 @@ export class ProjectService {
     db.delete(paperRecordsTable)
       .where(eq(paperRecordsTable.projectId, projectId))
       .run();
-    db.$client.prepare('DELETE FROM history_workspaces WHERE project_id = ?').run(projectId);
+    db.$client
+      .prepare('DELETE FROM history_workspaces WHERE project_id = ?')
+      .run(projectId);
     db.delete(projectsTable).where(eq(projectsTable.id, projectId)).run();
   }
 
@@ -1231,36 +1206,22 @@ export class ProjectService {
 
       const pages: PaperPage[] = [];
       for (const [index, originalPath] of originalPaths.entries()) {
-        const assets = getPaperPageAssetPaths(
+        const scannedPath = getFullPagePath(
           project.rootPath,
           paperCode,
           originalPath,
         );
-        const [originalVersion, scannedVersion, debugPreviewVersion] =
-          await Promise.all([
-            getFileVersion(originalPath),
-            getFileVersion(assets.scannedPath),
-            getFileVersion(assets.debugPreviewPath),
-          ]);
-        const corners = (await fs.pathExists(assets.cornersPath))
-          ? (
-              (await fs.readJson(assets.cornersPath)) as {
-                corners?: PaperPage['corners'];
-              }
-            ).corners
-          : undefined;
+        const [originalVersion, scannedVersion] = await Promise.all([
+          getFileVersion(originalPath),
+          getFileVersion(scannedPath),
+        ]);
 
         pages.push({
           pageIndex: index,
           originalPath,
           originalVersion,
-          scannedPath: scannedVersion ? assets.scannedPath : undefined,
+          scannedPath: scannedVersion ? scannedPath : undefined,
           scannedVersion,
-          debugPreviewPath: debugPreviewVersion
-            ? assets.debugPreviewPath
-            : undefined,
-          debugPreviewVersion,
-          corners,
         });
       }
 
@@ -1308,10 +1269,7 @@ export class ProjectService {
     const skipCompleted = options?.skipCompleted ?? true;
     const pagesToHandle = papers.flatMap((paper) =>
       paper.originalPages
-        .filter(
-          (page) =>
-            !(skipCompleted && page.scannedPath && page.debugPreviewPath),
-        )
+        .filter((page) => !(skipCompleted && page.scannedPath))
         .map((page) => ({
           paperCode: paper.paperCode,
           page,
@@ -1327,29 +1285,15 @@ export class ProjectService {
         throw new Error('扫描任务已取消');
       }
 
-      const assets = getPaperPageAssetPaths(
+      const scannedPath = getFullPagePath(
         project.rootPath,
         item.paperCode,
         item.page.originalPath,
       );
-      if (
-        skipCompleted &&
-        (await fs.pathExists(assets.scannedPath)) &&
-        (await fs.pathExists(assets.debugPreviewPath))
-      ) {
+      if (skipCompleted && (await fs.pathExists(scannedPath))) {
         skippedPageCount += 1;
       } else {
-        await processDocumentImage(
-          item.page.originalPath,
-          assets.scannedPath,
-          assets.debugPreviewPath,
-          assets.cornersPath,
-          {
-            applyPostProcess: project.settings.enableScanPostProcess,
-            skipScanProcessing: project.settings.skipScanProcessing,
-            scanMarginRatio: project.settings.scanMarginRatio,
-          },
-        );
+        await processDocumentImage(item.page.originalPath, scannedPath);
         processedPageCount += 1;
       }
 
@@ -1792,10 +1736,8 @@ export class ProjectService {
                 pageIndex: page.pageIndex,
                 originalFileName: toRelativeAssetName(page.originalPath),
                 scannedFileName: toRelativeAssetName(page.scannedPath),
-                debugPreviewFileName: toRelativeAssetName(
-                  page.debugPreviewPath,
-                ),
-                corners: page.corners ?? null,
+                debugPreviewFileName: null,
+                corners: null,
               })),
             }
           : null,
@@ -1856,8 +1798,9 @@ export class ProjectService {
     const outputPath =
       options?.targetPath ??
       path.join(structure.exportsDir, buildExcelExportFileName(project.name));
-    const latestPostProcessScoreMap =
-      await this.getLatestPostProcessScoreMap(project.rootPath);
+    const latestPostProcessScoreMap = await this.getLatestPostProcessScoreMap(
+      project.rootPath,
+    );
     const exportableResults = results.filter(
       (
         item,
@@ -2029,15 +1972,13 @@ export class ProjectService {
 
     for (const result of exportableResults) {
       for (const question of result.finalResult.questionScores) {
-        const current =
-          questionMap.get(question.questionId) ??
-          {
-            questionId: question.questionId,
-            questionTitle: question.questionTitle,
-            maxScore: question.maxScore,
-            correctCount: 0,
-            totalCount: 0,
-          };
+        const current = questionMap.get(question.questionId) ?? {
+          questionId: question.questionId,
+          questionTitle: question.questionTitle,
+          maxScore: question.maxScore,
+          correctCount: 0,
+          totalCount: 0,
+        };
 
         current.totalCount += 1;
         if (question.score >= question.maxScore) {
@@ -2057,7 +1998,9 @@ export class ProjectService {
         `${question.questionId}-${question.questionTitle || question.questionId} (${question.maxScore}分)`,
         question.correctCount,
         question.totalCount,
-        question.totalCount > 0 ? question.correctCount / question.totalCount : 0,
+        question.totalCount > 0
+          ? question.correctCount / question.totalCount
+          : 0,
       ]);
 
     const workbook = new ExcelJS.Workbook();

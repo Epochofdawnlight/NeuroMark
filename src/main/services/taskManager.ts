@@ -481,9 +481,7 @@ export class TaskManager {
         count +
         paper.originalPages.filter(
           (page) =>
-            !(options?.skipCompleted ?? true) ||
-            !page.scannedPath ||
-            !page.debugPreviewPath,
+            !(options?.skipCompleted ?? true) || !page.scannedPath,
         ).length,
       0,
     );
@@ -491,9 +489,6 @@ export class TaskManager {
     const now = new Date().toISOString();
     const jobId = nanoid();
     const controller = new AbortController();
-    const runningSummary = project.settings.skipScanProcessing
-      ? '正在直通复用原始图片'
-      : '正在批量扫描识别答卷';
 
     db.insert(tasksTable)
       .values({
@@ -511,7 +506,7 @@ export class TaskManager {
         archivedAt: null,
         abortable: true,
         currentPaperLabel: papers[0]?.paperCode ?? '准备中',
-        summary: runningSummary,
+        summary: '正在准备整页答卷',
         createdAt: now,
         updatedAt: now,
       })
@@ -709,13 +704,6 @@ export class TaskManager {
   ): Promise<void> {
     const db = getDatabase();
     const startedAt = Date.now();
-    const project = await this.projects.getProjectById(projectId);
-    const runningSummaryPrefix = project.settings.skipScanProcessing
-      ? '正在直通复用原始图片'
-      : '正在识别纸张边界与扫描效果';
-    const completedSummaryPrefix = project.settings.skipScanProcessing
-      ? '直通扫描任务已完成'
-      : '扫描任务已完成';
 
     try {
       const result = await this.projects.scanProjectDocuments(projectId, {
@@ -735,7 +723,7 @@ export class TaskManager {
               speed,
               eta: estimateEta(progress, speed * totalPageCount),
               currentPaperLabel,
-              summary: `${runningSummaryPrefix}，已完成 ${completedPageCount}/${Math.max(totalPageCount, 1)} 页`,
+              summary: `正在准备整页答卷，已完成 ${completedPageCount}/${Math.max(totalPageCount, 1)} 页`,
               updatedAt: new Date().toISOString(),
             })
             .where(eq(tasksTable.id, jobId))
@@ -766,8 +754,8 @@ export class TaskManager {
           finishedAt: new Date().toISOString(),
           summary:
             result.totalPageCount > 0
-              ? `${completedSummaryPrefix}，共处理 ${result.processedPageCount} 页`
-              : '没有需要扫描的新答卷',
+              ? `整页答卷准备完成，共处理 ${result.processedPageCount} 页`
+              : '没有需要处理的新答卷',
           updatedAt: new Date().toISOString(),
         })
         .where(eq(tasksTable.id, jobId))

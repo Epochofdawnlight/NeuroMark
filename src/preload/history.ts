@@ -67,6 +67,7 @@ export interface ExamMaterialFile {
 
 export interface HistoryDraft {
   phase?: 'catalog' | 'regions' | 'rubric' | 'ready';
+  fullPageRegionsConfirmed?: boolean;
   reference: string;
   material: string;
   questions: HistoryQuestion[];
@@ -176,6 +177,7 @@ export interface HistoryReport {
 export interface HistorySnapshot {
   revision: number;
   draft: HistoryDraft;
+  needsRegionReview: boolean;
   providers: HistoryProviderSettings;
   canAdoptProviders: boolean;
   approvedTrialId?: string;

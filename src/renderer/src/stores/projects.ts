@@ -185,9 +185,6 @@ export const useProjectsStore = defineStore('projects', {
           gradingConcurrency: settings.gradingConcurrency,
           drawRegions: settings.drawRegions,
           defaultImageDetail: settings.defaultImageDetail,
-          enableScanPostProcess: settings.enableScanPostProcess,
-          skipScanProcessing: settings.skipScanProcessing,
-          scanMarginRatio: settings.scanMarginRatio,
           studentRoster: settings.studentRoster,
         },
       );

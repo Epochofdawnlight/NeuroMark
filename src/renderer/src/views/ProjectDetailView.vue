@@ -126,9 +126,6 @@ function cloneProjectSettings(settings: ProjectSettings): ProjectSettings {
     gradingConcurrency: settings.gradingConcurrency,
     drawRegions: settings.drawRegions,
     defaultImageDetail: settings.defaultImageDetail,
-    enableScanPostProcess: settings.enableScanPostProcess,
-    skipScanProcessing: settings.skipScanProcessing,
-    scanMarginRatio: settings.scanMarginRatio,
     studentRoster: settings.studentRoster
       ? {
           rawText: settings.studentRoster.rawText,
@@ -159,9 +156,6 @@ const projectSettingsDraft = ref<ProjectSettings>({
   gradingConcurrency: 1,
   drawRegions: false,
   defaultImageDetail: 'high',
-  enableScanPostProcess: true,
-  skipScanProcessing: false,
-  scanMarginRatio: 1,
   studentRoster: null,
 });
 const projectSettingsDraftProjectId = ref('');
@@ -843,23 +837,8 @@ function buildScannedPreviewImage(
   return {
     src: page.scannedPath || page.originalPath,
     cacheKey: page.scannedPath ? page.scannedVersion : page.originalVersion,
-    title: `${paper.paperCode} · 扫描图 ${index + 1}`,
-    caption: page.scannedPath ? '已生成扫描件' : '等待扫描',
-  };
-}
-
-function buildDebugPreviewImage(
-  paper: PaperRecord,
-  page: PaperRecord['originalPages'][number],
-  index: number,
-): PreviewImageItem {
-  return {
-    src: page.debugPreviewPath || page.originalPath,
-    cacheKey: page.debugPreviewPath
-      ? page.debugPreviewVersion
-      : page.originalVersion,
-    title: `${paper.paperCode} · 边界图 ${index + 1}`,
-    caption: page.debugPreviewPath ? '已生成边界预览' : '等待扫描',
+    title: `${paper.paperCode} · 整页 ${index + 1}`,
+    caption: page.scannedPath ? '整页已就绪' : '待准备整页',
   };
 }
 
@@ -874,13 +853,6 @@ const allScannedPreviewImages = computed<PreviewImageItem[]>(() =>
   papers.value.flatMap((paper) =>
     paper.originalPages.map((page, index) =>
       buildScannedPreviewImage(paper, page, index),
-    ),
-  ),
-);
-const allDebugPreviewImages = computed<PreviewImageItem[]>(() =>
-  papers.value.flatMap((paper) =>
-    paper.originalPages.map((page, index) =>
-      buildDebugPreviewImage(paper, page, index),
     ),
   ),
 );
@@ -924,12 +896,6 @@ const projectSettingsDirty = computed(() => {
     projectSettingsDraft.value.drawRegions !== current.settings.drawRegions ||
     projectSettingsDraft.value.defaultImageDetail !==
       current.settings.defaultImageDetail ||
-    projectSettingsDraft.value.enableScanPostProcess !==
-      current.settings.enableScanPostProcess ||
-    projectSettingsDraft.value.skipScanProcessing !==
-      current.settings.skipScanProcessing ||
-    projectSettingsDraft.value.scanMarginRatio !==
-      current.settings.scanMarginRatio ||
     serializedProjectRosterDraft.value !==
       JSON.stringify(current.settings.studentRoster ?? null)
   );
@@ -1304,9 +1270,6 @@ watch(
         gradingConcurrency: 1,
         drawRegions: false,
         defaultImageDetail: 'high',
-        enableScanPostProcess: true,
-        skipScanProcessing: false,
-        scanMarginRatio: 1,
         studentRoster: null,
       });
       return;
@@ -2606,9 +2569,6 @@ async function saveProjectSettings() {
     gradingConcurrency: projectSettingsDraft.value.gradingConcurrency,
     drawRegions: projectSettingsDraft.value.drawRegions,
     defaultImageDetail: projectSettingsDraft.value.defaultImageDetail,
-    enableScanPostProcess: projectSettingsDraft.value.enableScanPostProcess,
-    skipScanProcessing: projectSettingsDraft.value.skipScanProcessing,
-    scanMarginRatio: projectSettingsDraft.value.scanMarginRatio,
     studentRoster: nextStudentRoster,
   };
   const projectIdToSave = selectedProject.value.id;
@@ -2920,7 +2880,7 @@ function goBack() {
               :loading="scanActionLoading"
               @click="startScan"
             >
-              开始扫描识别
+              准备整页答卷
             </n-button>
             <n-button
               secondary
@@ -2928,7 +2888,7 @@ function goBack() {
               :loading="scanActionLoading"
               @click="forceRescan"
             >
-              强制重新扫描
+              重新生成整页
             </n-button>
           </template>
           <n-button
@@ -2988,7 +2948,7 @@ function goBack() {
                 <MetricCard
                   label="已扫描"
                   :value="selectedProject.stats.scannedPaperCount"
-                  hint="已生成扫描件"
+                  hint="整页已就绪"
                 />
                 <MetricCard
                   label="已批改"
@@ -3144,7 +3104,7 @@ function goBack() {
                         移除试卷
                       </n-button>
                     </template>
-                    移除后会同时删除该试卷的原始图片、扫描结果、边界标注和批阅结果。确认继续吗？
+                    移除后会同时删除该试卷的原始图片、整页答卷和批阅结果。确认继续吗？
                   </n-popconfirm>
                 </div>
               </template>
@@ -3188,7 +3148,7 @@ function goBack() {
           <n-empty v-else description="还没有导入原始答卷图片" />
         </n-tab-pane>
 
-        <n-tab-pane name="scans" tab="扫描答卷库">
+        <n-tab-pane name="scans" tab="整页答卷库">
           <div v-if="papers.length" class="paper-grid">
             <n-card
               v-for="paper in papers"
@@ -3199,41 +3159,21 @@ function goBack() {
               <template #header-extra>
                 <StatusPill :value="paper.scanStatus" />
               </template>
-              <div class="scan-panel">
-                <div class="scan-column">
-                  <div class="scan-column-title">扫描结果</div>
-                  <div class="image-grid">
-                    <ImagePreviewTile
-                      v-for="(page, pageIndex) in paper.originalPages"
-                      :key="`${paper.id}-${page.pageIndex}-scan`"
-                      :image="buildScannedPreviewImage(paper, page, pageIndex)"
-                      :preview-images="allScannedPreviewImages"
-                      :initial-index="
-                        getPaperPagePreviewIndex(paper.id, pageIndex)
-                      "
-                      preview-title="扫描结果总览"
-                    />
-                  </div>
-                </div>
-                <div class="scan-column">
-                  <div class="scan-column-title">边界标注</div>
-                  <div class="image-grid">
-                    <ImagePreviewTile
-                      v-for="(page, pageIndex) in paper.originalPages"
-                      :key="`${paper.id}-${page.pageIndex}-debug`"
-                      :image="buildDebugPreviewImage(paper, page, pageIndex)"
-                      :preview-images="allDebugPreviewImages"
-                      :initial-index="
-                        getPaperPagePreviewIndex(paper.id, pageIndex)
-                      "
-                      preview-title="边界标注总览"
-                    />
-                  </div>
-                </div>
+              <div class="image-grid">
+                <ImagePreviewTile
+                  v-for="(page, pageIndex) in paper.originalPages"
+                  :key="`${paper.id}-${page.pageIndex}-scan`"
+                  :image="buildScannedPreviewImage(paper, page, pageIndex)"
+                  :preview-images="allScannedPreviewImages"
+                  :initial-index="
+                    getPaperPagePreviewIndex(paper.id, pageIndex)
+                  "
+                  preview-title="整页答卷总览"
+                />
               </div>
             </n-card>
           </div>
-          <n-empty v-else description="导入原始答卷后即可启动扫描识别" />
+          <n-empty v-else description="导入答卷后可准备整页" />
         </n-tab-pane>
 
         <n-tab-pane name="history-grading" tab="按题阅卷" display-directive="show:lazy">
@@ -5301,38 +5241,6 @@ function goBack() {
                       ]"
                     />
                   </n-form-item>
-                  <n-form-item label="扫描裕度比例">
-                    <n-input-number
-                      v-model:value="projectSettingsDraft.scanMarginRatio"
-                      :min="1"
-                      :step="0.01"
-                      :precision="2"
-                      class="create-project-half-input"
-                    />
-                  </n-form-item>
-                </div>
-                <div class="create-project-toggle-row">
-                  <div class="create-project-toggle-copy">
-                    <div class="field-label">跳过扫描处理</div>
-                    <div class="field-hint">
-                      开启后不再识别边界，直接将原始答卷图片作为扫描结果使用。
-                    </div>
-                  </div>
-                  <n-switch
-                    v-model:value="projectSettingsDraft.skipScanProcessing"
-                  />
-                </div>
-                <div class="create-project-toggle-row">
-                  <div class="create-project-toggle-copy">
-                    <div class="field-label">扫描后处理</div>
-                    <div class="field-hint">
-                      自动扫描只在确认纸张外缘后透视校正。此开关控制校正后的增强与二值化。
-                    </div>
-                  </div>
-                  <n-switch
-                    v-model:value="projectSettingsDraft.enableScanPostProcess"
-                    :disabled="projectSettingsDraft.skipScanProcessing"
-                  />
                 </div>
                 <div class="create-project-toggle-row">
                   <div class="create-project-toggle-copy">

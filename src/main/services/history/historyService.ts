@@ -391,7 +391,7 @@ export class HistoryService {
       throw new Error('顶部遮挡应在 0% 到 50% 之间。');
     const pages = paper.originalPages;
     if (!pages.length || pages.some((page) => !page.scannedPath))
-      throw new Error('请先矫正样卡的所有页面。');
+      throw new Error('请先准备样卡的所有整页。');
     const config = connectionFor(
       this.effectiveProviders(this.load(projectId)).recognition,
     );
@@ -480,9 +480,17 @@ export class HistoryService {
     const state = this.load(projectId);
     const saved = this.savedDefaults();
     const providers = { ...state.providers, ...saved };
+    const needsRegionReview =
+      !state.draft.fullPageRegionsConfirmed &&
+      state.draft.questions.length > 0 &&
+      state.draft.phase !== 'catalog' &&
+      state.draft.phase !== 'regions';
     return {
       revision: state.revision,
-      draft: state.draft,
+      draft: needsRegionReview
+        ? { ...state.draft, phase: 'regions' }
+        : state.draft,
+      needsRegionReview,
       providers: providersFor(providers),
       canAdoptProviders: providerRoles.some(
         (role) => !saved[role] && state.providers[role].encryptedKey,
@@ -603,6 +611,8 @@ export class HistoryService {
     try {
       const papers = await this.projects.listProjectPapers(projectId);
       const state = this.load(projectId);
+      if (!state.draft.fullPageRegionsConfirmed)
+        throw new Error('请先核对并确认整页答题区域。');
       const draft = validateHistoryDraft(state.draft, true);
       const providers = this.effectiveProviders(state);
       const connections = this.connections(providers);
@@ -675,6 +685,8 @@ export class HistoryService {
     this.ensureIdle(projectId);
     const state = this.load(projectId);
     const run = findRun(state, runId);
+    if (!run.draft.fullPageRegionsConfirmed)
+      throw new Error('请核对整页答题区域，再开始新的试阅。');
     const providers = this.effectiveProviders(state);
     if (
       state[run.kind]?.id !== run.id ||
@@ -922,6 +934,7 @@ export class HistoryService {
 
   private approved(state: Workspace, providers: StoredProviders): boolean {
     return Boolean(
+      state.draft.fullPageRegionsConfirmed &&
       state.approvedTrialId &&
       state.trial?.id === state.approvedTrialId &&
       state.trial.revision === state.revision &&

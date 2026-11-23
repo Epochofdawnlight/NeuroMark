@@ -84,9 +84,9 @@ export const SCORE_POST_PROCESS_AI_SCRIPT_RUNTIME_PROMPT = `
   - \`project.settings.gradingConcurrency\`: 批阅并发数
   - \`project.settings.drawRegions\`: 是否绘制区域
   - \`project.settings.defaultImageDetail\`: 图像细节等级
-  - \`project.settings.enableScanPostProcess\`: 是否开启扫描后处理
-  - \`project.settings.skipScanProcessing\`: 是否跳过扫描处理
-  - \`project.settings.scanMarginRatio\`: 扫描裕度比例
+  - \`project.settings.enableScanPostProcess\`: 旧版兼容字段，固定为 false
+  - \`project.settings.skipScanProcessing\`: 旧版兼容字段，固定为 true
+  - \`project.settings.scanMarginRatio\`: 旧版兼容字段，固定为 1
 
 - \`papers\`: 已批改答卷数组，只读。每个元素都表示一份答卷。
   - \`paper.paperId\`: 试卷唯一 ID，输出结果时必须原样带回

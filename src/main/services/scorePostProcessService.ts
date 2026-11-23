@@ -399,7 +399,12 @@ function buildProjectContext(
     rootPath: project.rootPath,
     referenceAnswerVersion: project.referenceAnswerVersion,
     stats: project.stats,
-    settings: project.settings,
+    settings: {
+      ...project.settings,
+      enableScanPostProcess: false,
+      skipScanProcessing: true,
+      scanMarginRatio: 1,
+    },
   };
 }
 

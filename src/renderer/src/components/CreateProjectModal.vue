@@ -28,9 +28,6 @@ const model = reactive<CreateProjectInput>({
   gradingConcurrency: 1,
   drawRegions: false,
   defaultImageDetail: 'high',
-  enableScanPostProcess: true,
-  skipScanProcessing: false,
-  scanMarginRatio: 1,
 });
 
 async function fillDefaultBasePath(force = false) {
@@ -49,9 +46,6 @@ watch(
       model.gradingConcurrency = 1;
       model.drawRegions = false;
       model.defaultImageDetail = 'high';
-      model.enableScanPostProcess = true;
-      model.skipScanProcessing = false;
-      model.scanMarginRatio = 1;
       return;
     }
 
@@ -121,39 +115,6 @@ function submit() {
             ]"
           />
         </n-form-item>
-        <n-form-item label="扫描裕度比例">
-          <n-input-number
-            v-model:value="model.scanMarginRatio"
-            :min="1"
-            :step="0.01"
-            :precision="2"
-            class="create-project-half-input"
-          />
-        </n-form-item>
-      </div>
-      <div class="field-hint">
-        1.00 表示按原始边界裁剪，1.10 表示以同一中心放大 10%。
-      </div>
-      <div class="create-project-toggle-row">
-        <div class="create-project-toggle-copy">
-          <div class="field-label">跳过扫描处理</div>
-          <div class="field-hint">
-            开启后不做边界识别、拉平或裁剪，直接将原始答卷图片作为扫描结果。
-          </div>
-        </div>
-        <n-switch v-model:value="model.skipScanProcessing" />
-      </div>
-      <div class="create-project-toggle-row">
-        <div class="create-project-toggle-copy">
-          <div class="field-label">启用扫描后处理</div>
-          <div class="field-hint">
-            自动扫描只在确认纸张外缘后透视校正。此开关控制校正后的增强与二值化。
-          </div>
-        </div>
-        <n-switch
-          v-model:value="model.enableScanPostProcess"
-          :disabled="model.skipScanProcessing"
-        />
       </div>
       <div class="create-project-toggle-row">
         <div class="create-project-toggle-copy">

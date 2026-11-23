@@ -128,6 +128,7 @@ it('reuses OCR during rubric revision and exports the teacher-confirmed formal b
       apiKey: 'fake',
     });
     const draft: HistoryDraft = {
+      fullPageRegionsConfirmed: true,
       reference: '工商业发展',
       material: '',
       questions: [
@@ -344,7 +345,7 @@ it('prepares an exam from mixed material and grades its 2B row locally', async (
     );
     await service.saveDraft('exam', 0, draft);
     await expect(service.start('exam', 'trial', 1)).rejects.toThrow(
-      '先确认评分细则',
+      '确认整页答题区域',
     );
     draft.choiceGrids = [
       {
@@ -357,6 +358,7 @@ it('prepares an exam from mixed material and grades its 2B row locally', async (
     draft.questions[1].regions = [
       { page: 0, x: 0.1, y: 0.45, width: 0.8, height: 0.4 },
     ];
+    draft.fullPageRegionsConfirmed = true;
     draft.phase = 'rubric';
     draft.material = await service.readExamMaterials('exam', [
       {
