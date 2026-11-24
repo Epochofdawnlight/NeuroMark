@@ -9,11 +9,30 @@ const router = useRouter();
 const debugPanelStore = useDebugPanelStore();
 
 const navItems = [
-  { key: 'projects', label: '项目页面', subtitle: '项目、答卷与结果中心', path: '/projects' },
-  { key: 'tasks', label: '后台任务', subtitle: '扫描与批阅进度', path: '/tasks' },
-  { key: 'answer-generator', label: '参考答案生成', subtitle: '模板、生成与历史记录', path: '/answer-generator' },
-  { key: 'llm-usage', label: '模型计费', subtitle: 'Token 用量与费用估算', path: '/llm-usage' },
-  { key: 'settings', label: '全局设置', subtitle: '模型后端与连接测试', path: '/settings' },
+  {
+    key: 'projects',
+    label: '项目页面',
+    subtitle: '项目、答卷与结果中心',
+    path: '/projects',
+  },
+  {
+    key: 'tasks',
+    label: '后台任务',
+    subtitle: '扫描与批阅进度',
+    path: '/tasks',
+  },
+  {
+    key: 'llm-usage',
+    label: 'Token 用量',
+    subtitle: '按日查看模型请求与用量',
+    path: '/llm-usage',
+  },
+  {
+    key: 'settings',
+    label: '全局设置',
+    subtitle: '阅卷模型与连接测试',
+    path: '/settings',
+  },
 ];
 
 const visibleNavItems = computed(() => {
@@ -36,15 +55,15 @@ const activeKey = computed(() => {
     .map((item) => item.name)
     .filter((name): name is string => typeof name === 'string');
 
-  if (routeNames.some((name) => name.startsWith('answer-generator'))) {
-    return 'answer-generator';
-  }
-
   if (routeNames.some((name) => name.startsWith('tasks'))) {
     return 'tasks';
   }
 
-  if (routeNames.some((name) => name.startsWith('projects') || name === 'project-detail')) {
+  if (
+    routeNames.some(
+      (name) => name.startsWith('projects') || name === 'project-detail',
+    )
+  ) {
     return 'projects';
   }
 
@@ -73,7 +92,11 @@ function handleLogoClick() {
 <template>
   <aside class="nav-sidebar glass-panel">
     <div class="nav-sidebar-main">
-      <button class="brand-block brand-trigger" type="button" @click="handleLogoClick">
+      <button
+        class="brand-block brand-trigger"
+        type="button"
+        @click="handleLogoClick"
+      >
         <div class="brand-mark">
           <img class="brand-logo" :src="brandLogo" alt="NeuroMark logo" />
         </div>

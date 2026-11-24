@@ -14,11 +14,11 @@ InstallDirRegKey HKCU "Software\HistoryGrading" "InstallLocation"
 SetCompressor /SOLID lzma
 ShowInstDetails hide
 
-VIProductVersion "1.5.0.0"
+VIProductVersion "1.6.0.0"
 VIAddVersionKey /LANG=2052 "ProductName" "NeuroMark"
 VIAddVersionKey /LANG=2052 "FileDescription" "NeuroMark 安装程序"
-VIAddVersionKey /LANG=2052 "FileVersion" "1.5.0"
-VIAddVersionKey /LANG=2052 "ProductVersion" "1.5.0"
+VIAddVersionKey /LANG=2052 "FileVersion" "1.6.0"
+VIAddVersionKey /LANG=2052 "ProductVersion" "1.6.0"
 VIAddVersionKey /LANG=2052 "LegalCopyright" "NeuroMark contributors"
 
 !insertmacro MUI_PAGE_WELCOME
@@ -146,7 +146,7 @@ registry:
 save_registry:
   WriteRegStr HKCU "Software\HistoryGrading" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\HistoryGrading" "DisplayName" "NeuroMark"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\HistoryGrading" "DisplayVersion" "1.5.0"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\HistoryGrading" "DisplayVersion" "1.6.0"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\HistoryGrading" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\HistoryGrading" "DisplayIcon" "$INSTDIR\NeuroMark.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\HistoryGrading" "UninstallString" '$\"$INSTDIR\Uninstall HistoryGrading.exe$\"'

@@ -17,7 +17,7 @@ export function registerIpcHandlers(services: ServiceBundle): void {
   registerProjectIpc(services);
   registerScanIpc(services);
   registerGradingIpc(services);
-  registerHistoryIpc(services.projects);
+  registerHistoryIpc(services.projects, services.tasks);
   registerSettingsIpc(services);
   registerScorePostProcessIpc(services);
   registerLlmUsageIpc(services);

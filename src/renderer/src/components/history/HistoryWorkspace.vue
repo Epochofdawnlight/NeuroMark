@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import {
   NAlert,
   NButton,
   NCard,
   NInputNumber,
   NPopconfirm,
+  NRadioButton,
+  NRadioGroup,
   NSelect,
   NSpace,
   NTag,
@@ -22,12 +24,13 @@ import type {
   HistoryRun,
   HistorySnapshot,
 } from '@preload/history';
+import { mergeQuestionCatalog } from '@preload/examDraft';
 import HistoryCatalog from './HistoryCatalog.vue';
 import HistoryReview from './HistoryReview.vue';
 import HistoryRegions from './HistoryRegions.vue';
 import ChoiceGridEditor from './ChoiceGridEditor.vue';
 import RubricWorkbench from './RubricWorkbench.vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 
 const props = defineProps<{
   projectId: string;
@@ -37,17 +40,24 @@ const props = defineProps<{
 const emit = defineEmits<{ papersChanged: [] }>();
 const message = useMessage();
 const router = useRouter();
+const route = useRoute();
 const api = window.neuromark.history;
 const snapshot = ref<HistorySnapshot>();
 const draft = ref<HistoryDraft>({ reference: '', material: '', questions: [] });
 const draftRevision = ref(0);
 const sampleSize = ref<number | null>(10);
 const concurrency = ref<number | null>(DEFAULT_HISTORY_CONCURRENCY);
-type View = 'catalog' | 'regions' | 'rubric' | 'trial' | 'formal' | 'archive';
+type View =
+  | 'catalog'
+  | 'regions'
+  | 'choice'
+  | 'rubric'
+  | 'trial'
+  | 'formal'
+  | 'archive';
 const view = ref<View>('catalog');
-const regionView = ref<'written' | 'choice'>('written');
-const hasChoice = computed(() =>
-  draft.value.questions.some((item) => item.kind === 'choice'),
+const choiceQuestions = computed(() =>
+  draft.value.questions.filter((item) => item.kind === 'choice'),
 );
 const hasWritten = computed(() =>
   draft.value.questions.some((item) => item.kind !== 'choice'),
@@ -57,17 +67,42 @@ const hasPreparedPage = computed(() =>
     paper.originalPages.some((page) => page.scannedPath),
   ),
 );
+const choiceMode = computed({
+  get: () =>
+    draft.value.choiceMode ??
+    (draft.value.choiceGrids?.length ? 'omr' : undefined),
+  set: (mode: HistoryDraft['choiceMode']) => {
+    draft.value.choiceMode = mode;
+  },
+});
+const canConfirmChoice = computed(() => {
+  if (!choiceMode.value) return false;
+  if (choiceMode.value === 'none') return hasWritten.value;
+  const assigned = new Set(
+    draft.value.choiceGrids?.flatMap((grid) => grid.questionIds),
+  );
+  return (
+    choiceQuestions.value.length > 0 &&
+    choiceQuestions.value.every((item) => assigned.has(item.id))
+  );
+});
 const steps = [
   { id: 'catalog', title: '上传与识别' },
-  { id: 'regions', title: '切割答题卡' },
+  { id: 'regions', title: '主观题切框' },
+  { id: 'choice', title: '选择题设置' },
   { id: 'rubric', title: '材料与细则' },
   { id: 'trial', title: '试阅抽检' },
   { id: 'formal', title: '正式阅卷' },
 ] as const;
 const unlocked = computed(() => {
   const phase = snapshot.value?.draft.phase ?? 'catalog';
-  if (phase === 'ready') return snapshot.value?.approvedTrialId ? 4 : 3;
-  return ['catalog', 'regions', 'rubric'].indexOf(phase);
+  const step =
+    phase === 'ready'
+      ? snapshot.value?.approvedTrialId
+        ? 'formal'
+        : 'trial'
+      : phase;
+  return steps.findIndex(({ id }) => id === step);
 });
 const archived = ref<HistoryRun>();
 const busy = ref(false);
@@ -110,17 +145,17 @@ async function refresh(reloadDraft = false) {
   try {
     const current = await api.get(props.projectId);
     if (requestId !== refreshId) return;
-    if (!snapshot.value) {
+    const first = !snapshot.value;
+    if (first) {
       concurrency.value =
         current.formal?.concurrency ??
         current.trial?.concurrency ??
         DEFAULT_HISTORY_CONCURRENCY;
       switch (current.draft.phase) {
         case 'regions':
-          view.value = 'regions';
-          break;
+        case 'choice':
         case 'rubric':
-          view.value = 'rubric';
+          view.value = current.draft.phase;
           break;
         case 'ready':
           view.value = current.approvedTrialId ? 'formal' : 'trial';
@@ -132,11 +167,26 @@ async function refresh(reloadDraft = false) {
       draftRevision.value = current.revision;
     }
     snapshot.value = current;
+    if (first) void revealTaskRun();
     loadingError.value = '';
   } catch (error) {
     if (requestId === refreshId) loadingError.value = String(error);
   }
 }
+
+async function revealTaskRun() {
+  const id = route.query.historyRun;
+  if (typeof id !== 'string' || !snapshot.value) return;
+  if (snapshot.value.trial?.id === id) view.value = 'trial';
+  else if (snapshot.value.formal?.id === id) view.value = 'formal';
+  else if (snapshot.value.pastRuns.some((run) => run.id === id))
+    await openArchive(id);
+}
+
+watch(
+  () => route.query.historyRun,
+  () => void revealTaskRun(),
+);
 
 function serialized<T>(input: T): T {
   return JSON.parse(JSON.stringify(input)) as T;
@@ -186,6 +236,32 @@ function savePhase(next: HistoryDraft, step: View, success?: string) {
     success,
     true,
   );
+}
+
+function confirmChoice() {
+  const mode = choiceMode.value;
+  if (!mode || !canConfirmChoice.value) return;
+  const current = draft.value;
+  const next =
+    mode === 'none' && choiceQuestions.value.length
+      ? mergeQuestionCatalog(
+          current,
+          current.questions.flatMap((item) =>
+            item.kind === 'choice' ? [] : [{ id: item.id, kind: 'written' }],
+          ),
+        )
+      : current;
+  return savePhase(
+    { ...next, phase: 'rubric', choiceMode: mode },
+    'rubric',
+    '选择题设置已确认',
+  );
+}
+
+function saveCurrentDraft() {
+  const phase = view.value;
+  if (phase === 'regions' || phase === 'choice' || phase === 'rubric')
+    return savePhase({ ...draft.value, phase }, phase, '草稿已保存');
 }
 
 function approveTrial() {
@@ -254,6 +330,31 @@ onBeforeUnmount(() => {
         >
       </n-space>
       <n-space align="center">
+        <n-select
+          v-if="snapshot.modelProfiles?.length"
+          aria-label="项目视觉模型"
+          style="min-width: 200px"
+          :disabled="busy || running || rubricBusy"
+          :value="snapshot.modelProfileId ?? 'default'"
+          :options="[
+            { label: '跟随全局默认', value: 'default' },
+            ...snapshot.modelProfiles.map((model) => ({
+              label: model.name,
+              value: model.id,
+            })),
+          ]"
+          @update:value="
+            (value) =>
+              act(
+                () =>
+                  api.setProjectModel(
+                    projectId,
+                    value === 'default' ? null : value,
+                  ),
+                '项目模型已更新',
+              )
+          "
+        />
         <span
           >视觉阅卷 ·
           {{
@@ -291,48 +392,78 @@ onBeforeUnmount(() => {
       />
       <template v-if="view === 'regions'">
         <n-alert v-if="snapshot.needsRegionReview" type="info">
-          项目已改用整页坐标。请先在项目顶部准备整页答卷，再核对已有题框和选择题填涂区。
+          项目已改用整页坐标。请先在项目顶部准备整页答卷，再核对主观题题框和选择题作答区。
         </n-alert>
-        <n-space v-if="hasChoice && hasWritten">
-          <n-button
-            :type="regionView === 'written' ? 'primary' : 'default'"
-            @click="regionView = 'written'"
-            >主观题切框</n-button
-          >
-          <n-button
-            :type="regionView === 'choice' ? 'primary' : 'default'"
-            @click="regionView = 'choice'"
-            >选择题填涂区</n-button
-          >
-        </n-space>
         <HistoryRegions
-          v-if="hasWritten && (regionView === 'written' || !hasChoice)"
+          v-if="hasWritten"
           v-model="draft"
           :project-id="projectId"
           :papers="papers"
           :disabled="busy || running"
         />
-        <ChoiceGridEditor
-          v-if="hasChoice && (regionView === 'choice' || !hasWritten)"
-          v-model="draft"
-          :papers="papers"
-          :disabled="busy || running"
-        />
+        <p v-else>题号列表没有主观题。</p>
         <n-button
           type="primary"
           :disabled="busy || running || !hasPreparedPage"
           @click="
             savePhase(
-              { ...draft, phase: 'rubric', fullPageRegionsConfirmed: true },
-              'rubric',
-              '答题区域已确认',
+              { ...draft, phase: 'choice', fullPageRegionsConfirmed: true },
+              'choice',
+              '主观题区域已确认',
             )
           "
-          >确认切题，进入材料与细则</n-button
+          >进入选择题设置</n-button
+        >
+      </template>
+      <template v-if="view === 'choice'">
+        <n-card size="small" title="选择题作答方式">
+          <n-space vertical>
+            <n-radio-group
+              v-model:value="choiceMode"
+              aria-label="选择题作答方式"
+              :disabled="busy || running"
+            >
+              <n-radio-button value="none">无选择题</n-radio-button>
+              <n-radio-button value="handwritten"
+                >手写字母（A–D）</n-radio-button
+              >
+              <n-radio-button value="omr">2B 填涂（OMR）</n-radio-button>
+            </n-radio-group>
+            <span v-if="choiceMode === 'none' && !hasWritten">
+              项目至少需要一道小题。请添加主观题题号，或选择实际使用的选择题作答方式。
+            </span>
+            <span v-else-if="choiceMode === 'none' && choiceQuestions.length">
+              确认后会移除题号列表中的选择题及其作答区。
+            </span>
+            <span
+              v-else-if="
+                choiceMode && !choiceQuestions.length && choiceMode !== 'none'
+              "
+            >
+              请返回上传与识别，添加选择题题号。
+            </span>
+          </n-space>
+        </n-card>
+        <ChoiceGridEditor
+          v-if="
+            choiceQuestions.length &&
+            (choiceMode === 'omr' || choiceMode === 'handwritten')
+          "
+          :key="choiceMode"
+          v-model="draft"
+          :mode="choiceMode"
+          :papers="papers"
+          :disabled="busy || running"
+        />
+        <n-button
+          type="primary"
+          :disabled="busy || running || !canConfirmChoice"
+          @click="confirmChoice"
+          >确认选择题设置，进入材料与细则</n-button
         >
       </template>
       <div
-        v-if="unlocked >= 2"
+        v-if="unlocked >= 3"
         v-show="view === 'rubric'"
         class="rubric-workbench"
       >
@@ -351,16 +482,13 @@ onBeforeUnmount(() => {
           "
         />
       </div>
-      <n-space v-if="view === 'regions' || view === 'rubric'" align="center">
+      <n-space
+        v-if="view === 'regions' || view === 'choice' || view === 'rubric'"
+        align="center"
+      >
         <n-button
           :disabled="busy || running || rubricBusy || !dirty"
-          @click="
-            savePhase(
-              { ...draft, phase: view === 'regions' ? 'regions' : 'rubric' },
-              view,
-              '草稿已保存',
-            )
-          "
+          @click="saveCurrentDraft"
           >保存草稿</n-button
         >
         <span
@@ -495,6 +623,21 @@ onBeforeUnmount(() => {
         </n-alert>
         <n-space align="center">
           <n-tag size="small">{{ statusLabel[activeRun.status] }}</n-tag>
+          <n-tag v-if="activeRun.modelName" size="small"
+            >{{ activeRun.modelName }} ·
+            {{ activeRun.timeoutSeconds ?? 180 }} 秒</n-tag
+          >
+          <n-button
+            v-if="
+              view !== 'archive' &&
+              activeRun.taskLinked &&
+              activeRun.status === 'running'
+            "
+            size="small"
+            :loading="busy"
+            @click="act(() => api.pause(projectId, activeRun!.id))"
+            >暂停阅卷</n-button
+          >
           <span
             >细则 v{{ activeRun.revision }} · {{ activeRun.sampledPapers }} /
             {{ activeRun.totalPapers }} 份 · 已处理

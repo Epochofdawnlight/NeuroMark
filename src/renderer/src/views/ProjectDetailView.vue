@@ -74,7 +74,6 @@ import { useDebugPanelStore } from '@/stores/debug-panel';
 import { useProjectsStore } from '@/stores/projects';
 import { useScorePostProcessStore } from '@/stores/score-post-process';
 import { useTasksStore } from '@/stores/tasks';
-import { useTokenVisualizerStore } from '@/stores/token-visualizer';
 import { toImageSrc } from '@/utils/file';
 import { cloneFinalResult, computeDisplayedTotal } from '@/utils/result';
 import {
@@ -99,7 +98,6 @@ const projectsStore = useProjectsStore();
 const scorePostProcessStore = useScorePostProcessStore();
 const tasksStore = useTasksStore();
 const debugPanelStore = useDebugPanelStore();
-const visualizerStore = useTokenVisualizerStore();
 
 const DEFAULT_PREVIEW_DISPLAY_OPTIONS: PreviewDisplayOptions = {
   showQuestionTags: true,
@@ -137,6 +135,13 @@ function cloneProjectSettings(settings: ProjectSettings): ProjectSettings {
 }
 
 const activeTab = ref('overview');
+watch(
+  () => [route.params.projectId, route.query.historyRun],
+  ([, runId]) => {
+    if (typeof runId === 'string' && runId) activeTab.value = 'history-grading';
+  },
+  { immediate: true },
+);
 const selectedResultId = ref('');
 const resultSearchKeyword = ref('');
 type ResultSortMode =
@@ -427,17 +432,6 @@ const currentResultPdfExportTask = computed(
         task.kind === 'result-pdf-export' &&
         ['queued', 'running', 'paused'].includes(task.status),
     ) ?? null,
-);
-const visualizerSourceTask = computed(
-  () =>
-    currentGradingTask.value ??
-    recentJobs.value.find(
-      (task) =>
-        task.kind === 'grading' &&
-        (task.streamPreviewText.trim().length > 0 ||
-          task.streamReasoningText.trim().length > 0),
-    ) ??
-    null,
 );
 const results = computed(() =>
   (detail.value?.results ?? []).filter(
@@ -1447,11 +1441,6 @@ watch(
 watch(
   () => smartNameMatchState.value.reasoningText,
   async () => {
-    visualizerStore.syncText(
-      `smart-name-match:${projectId.value}`,
-      'reasoning',
-      smartNameMatchState.value.reasoningText,
-    );
     if (!smartNameMatchIsRunning.value || smartNameMatchHasPreview.value) {
       return;
     }
@@ -1466,11 +1455,6 @@ watch(
 watch(
   () => smartNameMatchState.value.previewText,
   async () => {
-    visualizerStore.syncText(
-      `smart-name-match:${projectId.value}`,
-      'preview',
-      smartNameMatchState.value.previewText,
-    );
     if (!smartNameMatchIsRunning.value || !smartNameMatchHasPreview.value) {
       return;
     }
@@ -1480,30 +1464,6 @@ watch(
         smartNamePreviewRef.value.scrollHeight;
     }
   },
-);
-
-watch(
-  () => visualizerSourceTask.value?.streamReasoningText ?? '',
-  (nextText) => {
-    visualizerStore.syncText(
-      `grading-task:${visualizerSourceTask.value?.id ?? projectId.value}`,
-      'reasoning',
-      nextText,
-    );
-  },
-  { immediate: true },
-);
-
-watch(
-  () => visualizerSourceTask.value?.streamPreviewText ?? '',
-  (nextText) => {
-    visualizerStore.syncText(
-      `grading-task:${visualizerSourceTask.value?.id ?? projectId.value}`,
-      'preview',
-      nextText,
-    );
-  },
-  { immediate: true },
 );
 
 watch(
@@ -1833,33 +1793,6 @@ async function stopScan() {
     );
   } finally {
     scanActionLoading.value = false;
-  }
-}
-
-async function startGrading() {
-  if (
-    !selectedProject.value ||
-    gradingActionLoading.value ||
-    hasActiveGradingTask.value
-  ) {
-    return;
-  }
-  gradingActionLoading.value = true;
-  try {
-    await window.neuromark.grading.start(selectedProject.value.id, {
-      skipCompleted: true,
-    });
-    await Promise.all([
-      tasksStore.refresh(),
-      projectsStore.loadProjectDetail(selectedProject.value.id),
-    ]);
-    message.success('批阅任务已开始。');
-  } catch (error) {
-    message.error(
-      error instanceof Error ? error.message : '启动批阅任务失败。',
-    );
-  } finally {
-    gradingActionLoading.value = false;
   }
 }
 
@@ -3187,9 +3120,11 @@ function goBack() {
           />
         </n-tab-pane>
 
-        <n-tab-pane name="results" tab="旧版整卷结果">
-          <n-button v-if="papers.length && !hasActiveGradingTask" tertiary
-            :loading="gradingActionLoading" @click="startGrading">开始旧版整卷批阅</n-button>
+        <n-tab-pane
+          v-if="results.length || hasActiveGradingTask || activeTab === 'results'"
+          name="results"
+          tab="旧版整卷结果"
+        >
           <div
             v-if="papers.length"
             class="result-review-layout"

@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { safeStorage } from 'electron';
 import ExcelJS from 'exceljs';
 import { getDatabase } from '@main/database/client';
 import type { ProjectService } from '@main/services/projectService';
+import type { TaskManager } from '@main/services/taskManager';
 import type { PaperRecord } from '@preload/contracts';
 import {
   DEFAULT_HISTORY_CONCURRENCY,
@@ -15,6 +17,8 @@ import type {
   OpticalMark,
   HistoryEndpoint,
   HistoryEndpointInput,
+  HistoryModelProfile,
+  HistoryModelProfileInput,
   HistoryProviderInput,
   HistoryProviderSettings,
   HistoryRegion,
@@ -34,6 +38,7 @@ import {
   cropHistorySource,
   gradeHistoryAnswer,
   gradeHistoryImage,
+  readHandwrittenChoice,
   testHistoryConnection,
   type HistoryConnection,
   type HistoryTranscript,
@@ -48,10 +53,21 @@ import {
   gradeOpticalMark,
   readOpticalMarks,
 } from './opticalMarks';
+import {
+  DEFAULT_HISTORY_TIMEOUT_SECONDS,
+  readHistoryProfiles,
+  writeHistoryProfile,
+  type StoredHistoryProfile,
+} from './historyProfiles';
+import { recordHistoryUsage } from './historyUsage';
+import { findCachedResult, saveCachedResult } from './historyResultCache';
 
 type Role = keyof HistoryProviderSettings;
 type StoredEndpoint = Omit<HistoryEndpoint, 'hasKey'> & {
   encryptedKey: string;
+  timeoutSeconds?: number;
+  profileId?: string;
+  profileName?: string;
 };
 type Identity = { studentId: string; name: string };
 const providerRoles = ['recognition', 'grading'] as const;
@@ -62,6 +78,7 @@ interface Workspace {
   providerRevision: number;
   draft: HistoryDraft;
   providers: Record<Role, StoredEndpoint>;
+  modelProfileId?: string;
   approvedTrialId?: string;
   trial?: HistoryRun;
   formal?: HistoryRun;
@@ -144,7 +161,19 @@ function updateEndpoint(
 }
 
 function providerSignature(providers: StoredProviders): string {
-  return createHash('sha256').update(JSON.stringify(providers)).digest('hex');
+  const identity = ({ baseUrl, model, encryptedKey }: StoredEndpoint) => ({
+    baseUrl,
+    model,
+    encryptedKey,
+  });
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        recognition: identity(providers.recognition),
+        grading: identity(providers.grading),
+      }),
+    )
+    .digest('hex');
 }
 
 function sameProviders(
@@ -158,15 +187,38 @@ function sameProviders(
         providerSignature(state.providers) === providerSignature(providers);
 }
 
-function connectionFor(config: StoredEndpoint): HistoryConnection {
+function connectionFor(
+  config: StoredEndpoint,
+  projectId?: string,
+  operation?: string,
+): HistoryConnection {
   if (!config.baseUrl || !config.model || !config.encryptedKey) {
     throw new Error('请先配置此 API 的地址、模型与密钥。');
   }
   return {
     ...publicEndpoint(config),
+    timeoutMs:
+      (config.timeoutSeconds ?? DEFAULT_HISTORY_TIMEOUT_SECONDS) * 1000,
+    onUsage: (event) =>
+      recordHistoryUsage({
+        ...event,
+        projectId,
+        model: config.model,
+        operation: operation ?? event.operation,
+      }),
     apiKey: safeStorage.decryptString(
       Buffer.from(config.encryptedKey, 'base64'),
     ),
+  };
+}
+
+function publicProfile(profile: StoredHistoryProfile): HistoryModelProfile {
+  return {
+    ...publicEndpoint(profile),
+    id: profile.id,
+    name: profile.name,
+    timeoutSeconds: profile.timeoutSeconds,
+    isDefault: profile.isDefault,
   };
 }
 
@@ -207,6 +259,11 @@ function buildRows(papers: PaperRecord[], draft: HistoryDraft): HistoryRow[] {
               grid.questionIds.includes(question.id),
             )?.orientation
           : undefined;
+      const choiceMode = choiceOrientation
+        ? draft.choiceMode === 'handwritten'
+          ? 'handwritten'
+          : 'omr'
+        : undefined;
       const missing = !regions.length || sources.length !== regions.length;
       return {
         paperId: paper.id,
@@ -215,10 +272,13 @@ function buildRows(papers: PaperRecord[], draft: HistoryDraft): HistoryRow[] {
         sources,
         cacheKey: JSON.stringify(
           choiceOrientation
-            ? [paper.id, question.id, sources, choiceOrientation]
+            ? choiceMode === 'handwritten'
+              ? [paper.id, question.id, sources, choiceOrientation, choiceMode]
+              : [paper.id, question.id, sources, choiceOrientation]
             : [paper.id, question.id, sources],
         ),
         choiceOrientation,
+        choiceMode,
         status: missing ? 'error' : 'pending',
         error: !regions.length
           ? '这道小题还没有作答区域。请在答题区域工作台补画。'
@@ -257,11 +317,12 @@ function regionCount(run: HistoryRun, row: HistoryRow): number {
     : 0;
 }
 
-function reuseTrialRows(
+async function reuseTrialRows(
   rows: HistoryRow[],
   draft: HistoryDraft,
   prior: HistoryRun,
-): HistoryRow[] {
+  transcriptions: Workspace['transcriptions'],
+): Promise<HistoryRow[]> {
   if (
     draft.reference !== prior.draft.reference ||
     ((!draft.phase || !prior.draft.phase) &&
@@ -296,17 +357,48 @@ function reuseTrialRows(
       )
       .map((row) => [row.cacheKey, row]),
   );
-  return rows.map((row) => {
-    const previous =
-      row.status === 'pending' ? eligible.get(row.cacheKey) : undefined;
-    return previous ? structuredClone(previous) : row;
-  });
+  const versions = new Map<string, Promise<number | null>>();
+  function currentVersion(file: string) {
+    let version = versions.get(file);
+    if (!version) {
+      version = stat(file).then(
+        (info) => Math.trunc(info.mtimeMs),
+        () => null,
+      );
+      versions.set(file, version);
+    }
+    return version;
+  }
+  return Promise.all(
+    rows.map(async (row) => {
+      const previous =
+        row.status === 'pending' ? eligible.get(row.cacheKey) : undefined;
+      const manual = transcriptions[row.cacheKey];
+      if (!previous || (manual && manual.text !== previous.transcript))
+        return row;
+      const current = await Promise.all(
+        row.sources.map(
+          async ({ file, version }) =>
+            version !== null &&
+            Math.trunc(version) === (await currentVersion(file)),
+        ),
+      );
+      return current.every(Boolean) ? structuredClone(previous) : row;
+    }),
+  );
 }
 
 export class HistoryService {
   private active = new Set<string>();
+  private controllers = new Map<
+    string,
+    { runId: string; controller: AbortController }
+  >();
 
-  constructor(private projects: ProjectService) {}
+  constructor(
+    private projects: ProjectService,
+    private tasks?: TaskManager,
+  ) {}
 
   private savedDefaults(): Partial<StoredProviders> {
     const rows = getDatabase()
@@ -328,6 +420,25 @@ export class HistoryService {
     state: Workspace,
     saved = this.savedDefaults(),
   ): StoredProviders {
+    const profiles = this.profiles(saved);
+    const profile = state.modelProfileId
+      ? profiles.find((entry) => entry.id === state.modelProfileId)
+      : profiles.find((entry) => entry.isDefault);
+    if (state.modelProfileId && !profile)
+      throw new Error('项目所选模型已不存在，请重新选择。');
+    if (profile) {
+      const { baseUrl, model, encryptedKey, timeoutSeconds, id, name } =
+        profile;
+      const active = {
+        baseUrl,
+        model,
+        encryptedKey,
+        timeoutSeconds,
+        profileId: id,
+        profileName: name,
+      };
+      return { recognition: active, grading: active };
+    }
     const model =
       saved.recognition ??
       saved.grading ??
@@ -337,6 +448,76 @@ export class HistoryService {
           ? state.providers.grading
           : state.providers.recognition);
     return { recognition: model, grading: model };
+  }
+
+  private profiles(saved = this.savedDefaults()): StoredHistoryProfile[] {
+    const profiles = readHistoryProfiles();
+    const legacy = saved.recognition ?? saved.grading;
+    if (profiles.length || !legacy?.encryptedKey) return profiles;
+    return [
+      writeHistoryProfile(
+        {
+          ...legacy,
+          name: legacy.model,
+          timeoutSeconds: DEFAULT_HISTORY_TIMEOUT_SECONDS,
+        },
+        undefined,
+        true,
+      ),
+    ];
+  }
+
+  async listModelProfiles(): Promise<HistoryModelProfile[]> {
+    return this.profiles().map(publicProfile);
+  }
+
+  async saveModelProfile(
+    input: HistoryModelProfileInput,
+  ): Promise<HistoryModelProfile> {
+    const name = input.name.trim();
+    if (!name || name.length > 80)
+      throw new Error('请填写 1～80 字的模型名称。');
+    const profiles = this.profiles();
+    const previous = profiles.find((entry) => entry.id === input.id);
+    const timeoutSeconds =
+      input.timeoutSeconds ??
+      previous?.timeoutSeconds ??
+      DEFAULT_HISTORY_TIMEOUT_SECONDS;
+    if (
+      !Number.isInteger(timeoutSeconds) ||
+      timeoutSeconds < 30 ||
+      timeoutSeconds > 600
+    )
+      throw new Error('模型超时须为 30～600 秒。');
+    const endpoint = updateEndpoint(input, previous);
+    return publicProfile(
+      writeHistoryProfile(
+        { ...endpoint, name, timeoutSeconds },
+        input.id,
+        Boolean(input.makeDefault),
+      ),
+    );
+  }
+
+  async testModelProfile(id: string): Promise<void> {
+    const profile = this.profiles().find((entry) => entry.id === id);
+    if (!profile) throw new Error('找不到要测试的模型。');
+    await testHistoryConnection(
+      connectionFor(profile, undefined, '模型测试'),
+      true,
+    );
+  }
+
+  async setProjectModel(projectId: string, id: string | null): Promise<void> {
+    await this.projects.getProjectById(projectId);
+    this.ensureIdle(projectId);
+    const state = this.load(projectId);
+    if (id && !this.profiles().some((profile) => profile.id === id))
+      throw new Error('找不到要选择的模型。');
+    if (state.modelProfileId === (id ?? undefined)) return;
+    state.modelProfileId = id ?? undefined;
+    state.approvedTrialId = undefined;
+    this.write(projectId, state);
   }
 
   private writeDefault(role: Role, endpoint: StoredEndpoint): void {
@@ -371,7 +552,7 @@ export class HistoryService {
     parseRole(role);
     const endpoint = this.effectiveProviders(emptyWorkspace())[role];
     await testHistoryConnection(
-      connectionFor(endpoint),
+      connectionFor(endpoint, undefined, '模型测试'),
       role === 'recognition',
     );
   }
@@ -413,6 +594,8 @@ export class HistoryService {
       throw new Error('请先准备样卡的所有整页。');
     const config = connectionFor(
       this.effectiveProviders(this.load(projectId)).recognition,
+      projectId,
+      '题号识别',
     );
     const images = await Promise.all(
       pages.map((page) =>
@@ -435,7 +618,11 @@ export class HistoryService {
   async readExamMaterials(projectId: string, files: ExamMaterialFile[]) {
     await this.projects.getProjectById(projectId);
     return extractExamMaterials(files, () =>
-      connectionFor(this.effectiveProviders(this.load(projectId)).recognition),
+      connectionFor(
+        this.effectiveProviders(this.load(projectId)).recognition,
+        projectId,
+        '材料识别',
+      ),
     );
   }
 
@@ -450,7 +637,10 @@ export class HistoryService {
     if (!draft.material.trim() && !draft.reference.trim())
       throw new Error('请先输入试卷、答案或评分说明。');
     return organizeExamRubric(
-      connectionFor(this.effectiveProviders(this.load(projectId)).grading),
+      connectionFor(
+        this.effectiveProviders(this.load(projectId)).grading,
+        projectId,
+      ),
       draft,
       instruction.trim(),
     );
@@ -503,7 +693,8 @@ export class HistoryService {
       !state.draft.fullPageRegionsConfirmed &&
       state.draft.questions.length > 0 &&
       state.draft.phase !== 'catalog' &&
-      state.draft.phase !== 'regions';
+      state.draft.phase !== 'regions' &&
+      state.draft.phase !== 'choice';
     return {
       revision: state.revision,
       draft: needsRegionReview
@@ -511,6 +702,8 @@ export class HistoryService {
         : state.draft,
       needsRegionReview,
       providers: providersFor(providers),
+      modelProfileId: state.modelProfileId,
+      modelProfiles: this.profiles(saved).map(publicProfile),
       canAdoptProviders:
         !saved.recognition &&
         !saved.grading &&
@@ -602,6 +795,12 @@ export class HistoryService {
     if (state.revision !== revision)
       throw new Error('细则已经更新，请刷新后编辑。');
     const draft = validateHistoryDraft(input);
+    if (
+      state.draft.phase === 'choice' &&
+      (draft.phase === 'rubric' || draft.phase === 'ready') &&
+      !draft.choiceMode
+    )
+      throw new Error('请先确认选择题作答方式。');
     if (JSON.stringify(draft) === JSON.stringify(state.draft)) return;
     const withoutChat = (value: HistoryDraft) =>
       JSON.stringify({
@@ -642,7 +841,7 @@ export class HistoryService {
         throw new Error('请先核对并确认整页答题区域。');
       const draft = validateHistoryDraft(state.draft, true);
       const providers = this.effectiveProviders(state);
-      const model = connectionFor(providers.grading);
+      const model = connectionFor(providers.grading, projectId);
       if (!papers.length) throw new Error('项目中没有答卷。');
       if (kind === 'formal' && !this.approved(state, providers))
         throw new Error('请先通过当前版本的教师试阅。');
@@ -677,6 +876,10 @@ export class HistoryService {
         providerSignature: providerSignature(providers),
         scoringMode: 'image',
         concurrency,
+        timeoutSeconds:
+          providers.grading.timeoutSeconds ?? DEFAULT_HISTORY_TIMEOUT_SECONDS,
+        modelProfileId: providers.grading.profileId,
+        modelName: providers.grading.profileName ?? model.model,
         providers: providersFor(providers),
         draft,
         sampledPapers: selected.length,
@@ -687,7 +890,7 @@ export class HistoryService {
           previous &&
           previous.scoringMode === 'image' &&
           sameProviders(previous, state, providers)
-            ? reuseTrialRows(rows, draft, previous)
+            ? await reuseTrialRows(rows, draft, previous, state.transcriptions)
             : rows,
         status: 'running',
         createdAt: new Date().toISOString(),
@@ -695,8 +898,23 @@ export class HistoryService {
       if (previous) state.pastRuns.unshift(this.shownRun('', previous)!);
       state[kind] = run;
       if (kind === 'trial') state.approvedTrialId = undefined;
-      this.write(projectId, state);
-      void this.process(projectId, state, run, model);
+      await this.launch(projectId, state, run, model);
+      run.rows.forEach((row, index) => {
+        if (
+          row === rows[index] ||
+          (row.choiceOrientation && row.choiceMode !== 'handwritten')
+        )
+          return;
+        recordHistoryUsage({
+          projectId,
+          model: model.model,
+          operation:
+            row.choiceMode === 'handwritten' ? '手写选择题识别' : '图片阅卷',
+          durationMs: 0,
+          outcome: 'success',
+          cacheHit: true,
+        });
+      });
     } catch (error) {
       this.active.delete(projectId);
       throw error;
@@ -720,7 +938,7 @@ export class HistoryService {
     ) {
       throw new Error('请使用原模型设置重试当前批次，或重新开始试阅。');
     }
-    const model = connectionFor(providers.grading);
+    const model = connectionFor(providers.grading, projectId);
     for (const row of run.rows) {
       if (
         row.status === 'error' &&
@@ -735,12 +953,90 @@ export class HistoryService {
     if (run.kind === 'trial') state.approvedTrialId = undefined;
     this.active.add(projectId);
     run.status = 'running';
+    run.timeoutSeconds =
+      providers.grading.timeoutSeconds ?? DEFAULT_HISTORY_TIMEOUT_SECONDS;
     try {
-      this.write(projectId, state);
-      void this.process(projectId, state, run, model);
+      await this.launch(projectId, state, run, model);
     } catch (error) {
       this.active.delete(projectId);
       throw error;
+    }
+  }
+
+  async pause(projectId: string, runId: string) {
+    const active = this.controllers.get(projectId);
+    if (!active || active.runId !== runId)
+      throw new Error('当前批次没有在运行。');
+    active.controller.abort();
+  }
+
+  private async launch(
+    projectId: string,
+    state: Workspace,
+    run: HistoryRun,
+    model: HistoryConnection,
+  ) {
+    const controller = new AbortController();
+    if (this.tasks) {
+      if (run.taskLinked) {
+        await this.tasks.reopenHistoryJob(run.id);
+      } else {
+        const project = await this.projects.getProjectById(projectId);
+        await this.tasks.createJob({
+          id: run.id,
+          kind: run.kind === 'trial' ? 'history-trial' : 'history-formal',
+          projectId,
+          projectName: project.name,
+          status: 'running',
+          abortable: true,
+          summary: '正在准备按题阅卷',
+          progress:
+            1 -
+            run.rows.filter((row) => row.status === 'pending').length /
+              run.rows.length,
+        });
+        run.taskLinked = true;
+      }
+    }
+    try {
+      this.write(projectId, state);
+    } catch (error) {
+      await this.updateTask(run, 'failed', '无法保存阅卷批次');
+      throw error;
+    }
+    this.controllers.set(projectId, { runId: run.id, controller });
+    this.tasks?.trackHistoryJob(run.id, controller);
+    void this.process(projectId, state, run, {
+      ...model,
+      signal: controller.signal,
+    });
+  }
+
+  private async updateTask(
+    run: HistoryRun,
+    status: 'running' | 'paused' | 'completed' | 'failed',
+    summary?: string,
+  ) {
+    if (!this.tasks || !run.taskLinked) return;
+    const total = run.rows.length;
+    const pending = run.rows.filter((row) => row.status === 'pending').length;
+    const review = run.rows.filter(
+      (row) => row.status === 'error' || row.status === 'unreadable',
+    ).length;
+    const timeouts = run.rows.filter(
+      (row) => row.status === 'error' && row.error?.includes('超时'),
+    ).length;
+    try {
+      await this.tasks.updateJob(run.id, {
+        status,
+        progress: (total - pending) / Math.max(total, 1),
+        abortable: status === 'running',
+        summary:
+          summary ??
+          `已处理 ${total - pending}/${total} 个小题，${review} 项需复核${timeouts ? `，其中 ${timeouts} 项超时` : ''}`,
+      });
+    } catch (error) {
+      console.warn('无法更新按题阅卷任务', error);
     }
   }
 
@@ -750,12 +1046,17 @@ export class HistoryService {
     run: HistoryRun,
     model: HistoryConnection,
   ): Promise<void> {
+    const signal = model.signal;
     try {
-      const pending = run.rows.filter((row) => row.status === 'pending');
+      const order = new Map(run.draft.questions.map((q, i) => [q.id, i]));
+      const pending = run.rows
+        .filter((row) => row.status === 'pending')
+        .sort((a, b) => order.get(a.questionId)! - order.get(b.questionId)!);
       let next = 0;
       let writeFailed = false;
+      let lastTaskUpdate = 0;
       const work = async () => {
-        while (!writeFailed) {
+        while (!writeFailed && !signal?.aborted) {
           const row = pending[next++];
           if (!row) return;
           try {
@@ -763,23 +1064,34 @@ export class HistoryService {
             if (row.choiceOrientation) {
               const mark = manual
                 ? this.manualMark(manual.text)
-                : await readOpticalMarks(
-                    await cropHistorySource(row.sources[0]),
-                    row.choiceOrientation,
-                  );
+                : await this.readChoice(projectId, run, row, model);
               this.gradeChoiceRow(row, mark, run);
             } else {
-              await this.gradeImageRow(row, run, model, manual?.text);
+              await this.gradeImageRow(
+                projectId,
+                row,
+                run,
+                model,
+                manual?.text,
+              );
             }
           } catch (error) {
-            row.status = 'error';
-            row.error = error instanceof Error ? error.message : '阅卷失败。';
+            row.status = signal?.aborted ? 'pending' : 'error';
+            row.error = signal?.aborted
+              ? undefined
+              : error instanceof Error
+                ? error.message
+                : '阅卷失败。';
           }
           try {
             this.write(projectId, state);
           } catch (error) {
             writeFailed = true;
             throw error;
+          }
+          if (Date.now() - lastTaskUpdate >= 300) {
+            lastTaskUpdate = Date.now();
+            await this.updateTask(run, 'running');
           }
         }
       };
@@ -792,16 +1104,73 @@ export class HistoryService {
       );
       const failed = results.find((result) => result.status === 'rejected');
       if (failed) throw failed.reason;
-      run.status = 'review';
+      run.status = signal?.aborted ? 'paused' : 'review';
       this.write(projectId, state);
+      const allFailed = run.rows.every((row) => row.status === 'error');
+      await this.updateTask(
+        run,
+        signal?.aborted ? 'paused' : allFailed ? 'failed' : 'completed',
+        signal?.aborted ? '已暂停，已保存完成的小题' : undefined,
+      );
     } catch (error) {
+      await this.updateTask(
+        run,
+        'failed',
+        '未能保存全部进度，可从已保存的小题继续。',
+      );
       console.error('无法保存历史阅卷进度', error);
     } finally {
       this.active.delete(projectId);
+      this.controllers.delete(projectId);
+      this.tasks?.trackHistoryJob(run.id);
     }
   }
 
+  private async readChoice(
+    projectId: string,
+    run: HistoryRun,
+    row: HistoryRow,
+    model: HistoryConnection,
+  ) {
+    const image = await cropHistorySource(row.sources[0]);
+    if (row.choiceMode !== 'handwritten')
+      return readOpticalMarks(image, row.choiceOrientation!);
+    const key = this.resultKey(run, {
+      handwrittenChoice: row.questionId,
+      image,
+    });
+    const cached = findCachedResult(projectId, key);
+    if (cached?.kind === 'choice') {
+      recordHistoryUsage({
+        projectId,
+        model: model.model,
+        operation: '手写选择题识别',
+        durationMs: 0,
+        outcome: 'success',
+        cacheHit: true,
+      });
+      return cached.value;
+    }
+    const value = await readHandwrittenChoice(model, image);
+    if (value.status === 'single' || value.status === 'blank')
+      saveCachedResult(projectId, key, { kind: 'choice', value });
+    return value;
+  }
+
+  private resultKey(run: HistoryRun, input: object) {
+    return createHash('sha256')
+      .update(
+        JSON.stringify({
+          protocol: 'history-1.6-evidence',
+          provider: run.providerSignature,
+          input,
+        }),
+      )
+      .digest('hex');
+  }
+
   private async gradeImageRow(
+    projectId: string,
     row: HistoryRow,
     run: HistoryRun,
     model: HistoryConnection,
@@ -809,6 +1178,7 @@ export class HistoryService {
   ) {
     row.error = undefined;
     row.grade = undefined;
+    row.suggestedGrade = undefined;
     row.audit = undefined;
     row.transcript = teacherText;
     if (teacherText === '') {
@@ -818,14 +1188,42 @@ export class HistoryService {
     const question = run.draft.questions.find(
       (entry) => entry.id === row.questionId,
     )!;
-    const result = await gradeHistoryImage(
-      model,
-      question,
-      run.draft,
-      await Promise.all(row.sources.map(cropHistorySource)),
+    const images = await Promise.all(row.sources.map(cropHistorySource));
+    const regions = row.sources.map(({ region }) => region);
+    const key = this.resultKey(run, {
+      questionId: question.id,
+      prompt: question.prompt,
+      maxScore: question.maxScore,
+      criteria: question.criteria,
+      reference: question.reference || run.draft.reference,
+      material: run.draft.phase ? '' : run.draft.material,
+      images,
+      regions,
       teacherText,
-      row.sources.map(({ region }) => region),
-    );
+    });
+    const cached = findCachedResult(projectId, key);
+    const result =
+      cached?.kind === 'written'
+        ? cached.value
+        : await gradeHistoryImage(
+            model,
+            question,
+            run.draft,
+            images,
+            teacherText,
+            regions,
+          );
+    if (cached?.kind === 'written')
+      recordHistoryUsage({
+        projectId,
+        model: model.model,
+        operation: '图片阅卷',
+        durationMs: 0,
+        outcome: 'success',
+        cacheHit: true,
+      });
+    else if (result.status !== 'unreadable')
+      saveCachedResult(projectId, key, { kind: 'written', value: result });
     row.transcript = result.text;
     if (result.status === 'readable') {
       row.grade = result.grade;
@@ -833,6 +1231,7 @@ export class HistoryService {
     } else {
       row.status = result.status;
       row.error = result.reviewReason;
+      row.suggestedGrade = result.suggestedGrade;
     }
   }
 
@@ -887,7 +1286,9 @@ export class HistoryService {
       mark.status === 'multiple'
         ? '识别到多选，请依据原图复核。'
         : mark.status === 'uncertain'
-          ? '填涂偏浅或有擦改，请依据原图复核。'
+          ? row.choiceMode === 'handwritten'
+            ? '无法确认最后保留的选项，请依据原图复核。'
+            : '填涂偏浅或有擦改，请依据原图复核。'
           : undefined;
   }
 
@@ -943,9 +1344,10 @@ export class HistoryService {
         if (choice) this.gradeChoiceRow(row, choice, run);
         else if (run.scoringMode === 'image')
           await this.gradeImageRow(
+            projectId,
             row,
             run,
-            connectionFor(providers.grading),
+            connectionFor(providers.grading, projectId),
             value,
           );
         else

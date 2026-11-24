@@ -195,6 +195,22 @@ watch(
         <n-alert v-if="current.error || pictureError" type="warning">{{
           current.error || pictureError
         }}</n-alert>
+        <n-alert
+          v-if="current.suggestedGrade && !current.audit"
+          type="info"
+          title="模型建议 · 等待证据复核"
+        >
+          <p>
+            模型建议 {{ current.suggestedGrade.score }} /
+            {{ question.maxScore }} 分。请对照原图确定得分。
+          </p>
+          <ul>
+            <li v-for="point in current.suggestedGrade.points" :key="point.id">
+              {{ point.id }} · {{ point.score }} 分 ·
+              {{ point.evidence || '引文待核对' }} · {{ point.reason }}
+            </li>
+          </ul>
+        </n-alert>
         <div class="review">
           <div class="pictures">
             <img

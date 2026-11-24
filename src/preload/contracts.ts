@@ -3,6 +3,8 @@ export type LlmReasoningEffort = 'low' | 'medium' | 'high';
 export type JobKind =
   | 'scan'
   | 'grading'
+  | 'history-trial'
+  | 'history-formal'
   | 'answer-generation'
   | 'result-pdf-export';
 export type NameMatchStatus = 'unverified' | 'verified';
@@ -460,6 +462,56 @@ export interface TestLlmConnectionResult {
   latencyMs: number;
 }
 
+export interface HistoryUsageCalendarQuery {
+  fromDate: string;
+  toDate: string;
+  detailDate?: string;
+  model?: string;
+  projectId?: string;
+  operation?: string;
+}
+
+export interface HistoryUsageTotals {
+  requests: number;
+  successes: number;
+  failures: number;
+  cacheHits: number;
+  usageReported: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  cacheReadTokens: number | null;
+}
+
+export interface HistoryUsageDay extends HistoryUsageTotals {
+  date: string;
+}
+
+export interface HistoryUsageEvent {
+  id: number;
+  timestamp: number;
+  model: string;
+  operation: string;
+  projectName: string | null;
+  durationMs: number;
+  outcome: 'success' | 'error';
+  failure: string | null;
+  cacheHit: boolean;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  cacheReadTokens: number | null;
+}
+
+export interface HistoryUsageCalendar {
+  totals: HistoryUsageTotals;
+  days: HistoryUsageDay[];
+  events: HistoryUsageEvent[];
+  models: string[];
+  operations: string[];
+  projects: { id: string; name: string }[];
+}
+
 export type LlmUsageSource =
   | 'answer-generation'
   | 'grading-paper'
@@ -857,6 +909,9 @@ export interface NeuromarkApi {
     ) => Promise<string>;
   };
   llmUsage: {
+    getHistoryCalendar: (
+      query: HistoryUsageCalendarQuery,
+    ) => Promise<HistoryUsageCalendar>;
     getSummary: () => Promise<LlmUsageSummary>;
     getRecordPage: (
       page?: number,

@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron';
 import { z } from 'zod';
 import type { ServiceBundle } from '@main/services/types';
+import { getHistoryUsageCalendar } from '@main/services/history/historyUsage';
 
 const pricingSchema = z.object({
   inputPerMillion: z.number().min(0).max(1000000),
@@ -11,6 +12,9 @@ const pricingSchema = z.object({
 });
 
 export function registerLlmUsageIpc(services: ServiceBundle): void {
+  ipcMain.handle('llm-usage:get-history-calendar', (_event, query) =>
+    getHistoryUsageCalendar(query),
+  );
   ipcMain.handle('llm-usage:get-summary', () => services.llmUsage.getSummary());
   ipcMain.handle('llm-usage:get-record-page', (_event, page?: number, pageSize?: number) =>
     services.llmUsage.getRecordPage(page, pageSize),

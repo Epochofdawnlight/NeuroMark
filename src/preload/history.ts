@@ -69,7 +69,8 @@ export interface ExamMaterialFile {
 }
 
 export interface HistoryDraft {
-  phase?: 'catalog' | 'regions' | 'rubric' | 'ready';
+  phase?: 'catalog' | 'regions' | 'choice' | 'rubric' | 'ready';
+  choiceMode?: 'none' | 'handwritten' | 'omr';
   fullPageRegionsConfirmed?: boolean;
   reference: string;
   material: string;
@@ -99,6 +100,19 @@ export type HistoryEndpointInput = Pick<
 > & {
   apiKey?: string;
 };
+export interface HistoryModelProfile extends HistoryEndpoint {
+  id: string;
+  name: string;
+  timeoutSeconds: number;
+  isDefault: boolean;
+}
+
+export interface HistoryModelProfileInput extends HistoryEndpointInput {
+  id?: string;
+  name: string;
+  timeoutSeconds?: number;
+  makeDefault?: boolean;
+}
 export type HistoryProviderInput = Record<
   HistoryProviderRole,
   HistoryEndpointInput
@@ -133,7 +147,9 @@ export interface HistoryRow {
   transcript?: string;
   opticalMark?: OpticalMark;
   choiceOrientation?: ChoiceGrid['orientation'];
+  choiceMode?: 'handwritten' | 'omr';
   grade?: HistoryGrade;
+  suggestedGrade?: HistoryGrade;
   error?: string;
   audit?: { at: string; score: number; comment: string; note: string };
   edits?: (
@@ -156,6 +172,10 @@ export interface HistoryRun {
   providerSignature?: string;
   scoringMode?: 'image';
   concurrency?: number;
+  timeoutSeconds?: number;
+  modelProfileId?: string;
+  modelName?: string;
+  taskLinked?: boolean;
   providers: HistoryProviderSettings;
   draft: HistoryDraft;
   sampledPapers: number;
@@ -185,6 +205,8 @@ export interface HistorySnapshot {
   needsRegionReview: boolean;
   providers: HistoryProviderSettings;
   canAdoptProviders: boolean;
+  modelProfileId?: string;
+  modelProfiles?: HistoryModelProfile[];
   approvedTrialId?: string;
   trial?: HistoryRun;
   formal?: HistoryRun;
@@ -220,6 +242,12 @@ export interface HistoryApi {
     input: HistoryEndpointInput,
   ) => Promise<void>;
   testDefaultProvider: (role: HistoryProviderRole) => Promise<void>;
+  listModelProfiles: () => Promise<HistoryModelProfile[]>;
+  saveModelProfile: (
+    input: HistoryModelProfileInput,
+  ) => Promise<HistoryModelProfile>;
+  testModelProfile: (id: string) => Promise<void>;
+  setProjectModel: (projectId: string, id: string | null) => Promise<void>;
   adoptProviders: (projectId: string) => Promise<void>;
   previewRegions: (
     projectId: string,
@@ -255,6 +283,7 @@ export interface HistoryApi {
     concurrency?: number,
   ) => Promise<void>;
   resume: (projectId: string, runId: string) => Promise<void>;
+  pause: (projectId: string, runId: string) => Promise<void>;
   preview: (projectId: string, ref: HistoryRowRef) => Promise<string[]>;
   correctTranscript: (
     projectId: string,

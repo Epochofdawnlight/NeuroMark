@@ -47,8 +47,9 @@ export const rubricProposalSchema = z.object({
 });
 
 const draftSchema = z.object({
-  phase: z.enum(['catalog', 'regions', 'rubric', 'ready']).optional(),
+  phase: z.enum(['catalog', 'regions', 'choice', 'rubric', 'ready']).optional(),
   fullPageRegionsConfirmed: z.boolean().optional(),
+  choiceMode: z.enum(['none', 'handwritten', 'omr']).optional(),
   reference: z.string().trim(),
   material: z.string().trim(),
   rubricIssues: z.array(z.string()).optional(),
@@ -143,16 +144,31 @@ export function validateHistoryDraft(
   const choices = new Set(
     draft.questions.filter((q) => q.kind === 'choice').map((q) => q.id),
   );
+  if ((draft.phase === 'rubric' || ready) && draft.choiceMode) {
+    if (
+      draft.choiceMode === 'none' &&
+      (choices.size || draft.choiceGrids?.length)
+    )
+      throw new Error('已选择无选择题，请确认移除选择题及其答题区域。');
+    if (draft.choiceMode !== 'none' && !choices.size)
+      throw new Error('请先添加需要识别的选择题题号。');
+  }
   const used = new Set<string>();
   for (const grid of draft.choiceGrids ?? []) {
     for (const id of grid.questionIds) {
       if (!choices.has(id) || used.has(id))
-        throw new Error(`选择题 ${id} 必须且只能绑定到合适的填涂区一次。`);
+        throw new Error(`选择题 ${id} 必须且只能绑定到一个答题区域。`);
       used.add(id);
     }
   }
-  if (draft.phase === 'rubric' || draft.phase === 'ready') {
+  if (
+    draft.phase === 'choice' ||
+    draft.phase === 'rubric' ||
+    draft.phase === 'ready' ||
+    (ready && draft.choiceMode)
+  ) {
     for (const q of draft.questions) {
+      if (q.kind === 'choice' && draft.phase === 'choice') continue;
       const hasRegion =
         q.kind === 'choice'
           ? used.has(q.id)

@@ -230,7 +230,7 @@ function addChoiceRange() {
             v-model:value="item.kind"
             :options="[
               { value: 'written', label: '主观题' },
-              { value: 'choice', label: '2B 单选' },
+              { value: 'choice', label: '单选题' },
             ]"
             :disabled="disabled || busy"
           />
@@ -252,7 +252,7 @@ function addChoiceRange() {
           type="primary"
           :disabled="disabled || busy || !count"
           @click="confirm"
-          >确认题号，进入切题</n-button
+          >确认题号，进入主观题切框</n-button
         >
       </n-space>
     </n-space>

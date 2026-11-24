@@ -218,7 +218,7 @@ it('grades each image once with bounded concurrency and reuses unchanged trial r
     ]).toEqual(['2026001', 1, '请补充具体史实。']);
     expect(workbook.getWorksheet('学生总分')?.getCell('D2').value).toBe(3);
     expect(JSON.stringify(vision.requests)).toContain('data:image/png;base64,');
-    expect(vision.requests).toHaveLength(5);
+    expect(vision.requests).toHaveLength(3);
     draft.regionsByPaper = {
       p001: {
         '17(1)': [{ page: 0, x: 0.1, y: 0.55, width: 0.5, height: 0.4 }],
@@ -230,10 +230,10 @@ it('grades each image once with bounded concurrency and reuses unchanged trial r
     expect(changed.rows[0].sources[0].region.y).toBe(0.55);
     expect(changed.rows[1].sources[0].region.y).toBe(0.5);
     expect(changed.rows[1].audit?.score).toBe(2);
-    expect(vision.requests).toHaveLength(6);
+    expect(vision.requests).toHaveLength(4);
     await service.start('p', 'trial', 1, true);
     await trial();
-    expect(vision.requests).toHaveLength(6);
+    expect(vision.requests).toHaveLength(4);
     expect(legacy.requests).toHaveLength(0);
     expect(
       vision.requests.every(
@@ -254,6 +254,8 @@ it('prepares an exam from mixed material and grades its 2B row locally', async (
   const dir = await mkdtemp(path.join(os.tmpdir(), 'neuromark-exam-'));
   const vision = await modelServer((req) => {
     const system = String(req.messages[0].content);
+    if (system.includes('最终保留的手写选项'))
+      return { status: 'single', options: ['B'] };
     if (system.includes('印刷的小题'))
       return {
         items: [
@@ -388,6 +390,34 @@ it('prepares an exam from mixed material and grades its 2B row locally', async (
     expect(
       vision.requests.map(({ messages }) => Array.isArray(messages[1].content)),
     ).toEqual([true, false, true]);
+    const alternative = await service.saveModelProfile({
+      name: '备用本地模型',
+      baseUrl: vision.baseUrl,
+      model: 'other-vision',
+      apiKey: 'fake',
+      timeoutSeconds: 240,
+    });
+    await service.setProjectModel('exam', alternative.id);
+    expect((await service.get('exam')).providers.grading.model).toBe(
+      'other-vision',
+    );
+    await service.setProjectModel('exam', null);
+    const snapshot = await service.get('exam');
+    await service.saveDraft('exam', snapshot.revision, {
+      ...snapshot.draft,
+      choiceMode: 'handwritten',
+    });
+    await service.start('exam', 'trial', 1);
+    await vi.waitFor(async () =>
+      expect((await service.get('exam')).trial?.status).toBe('review'),
+    );
+    const handwritten = (await service.get('exam')).trial!;
+    expect(handwritten.rows[0]).toMatchObject({
+      choiceMode: 'handwritten',
+      opticalMark: { status: 'single', selected: 'B' },
+      grade: { score: 2 },
+    });
+    expect(vision.requests).toHaveLength(4);
   } finally {
     shared.database.close();
     vision.close();

@@ -1,49 +1,32 @@
+import { ref } from 'vue';
 import { defineStore } from 'pinia';
-import type { LlmPricingSettings, LlmUsageRecordPage, LlmUsageSummary } from '@preload/contracts';
+import type {
+  HistoryUsageCalendar,
+  HistoryUsageCalendarQuery,
+} from '@preload/contracts';
 
-export const useLlmUsageStore = defineStore('llm-usage', {
-  state: () => ({
-    summary: null as LlmUsageSummary | null,
-    recordPage: null as LlmUsageRecordPage | null,
-    loading: false,
-    recordsLoading: false,
-    saving: false,
-  }),
-  actions: {
-    async loadSummary() {
-      this.loading = true;
-      try {
-        this.summary = await window.neuromark.llmUsage.getSummary();
-        return this.summary;
-      } finally {
-        this.loading = false;
+export const useLlmUsageStore = defineStore('llm-usage', () => {
+  const calendar = ref<HistoryUsageCalendar>();
+  const loading = ref(false);
+  const error = ref('');
+  let requestId = 0;
+
+  async function load(query: HistoryUsageCalendarQuery) {
+    const current = ++requestId;
+    loading.value = true;
+    error.value = '';
+    try {
+      const result = await window.neuromark.llmUsage.getHistoryCalendar(query);
+      if (current === requestId) calendar.value = result;
+    } catch (failure) {
+      if (current === requestId) {
+        error.value =
+          failure instanceof Error ? failure.message : String(failure);
       }
-    },
-    async loadRecordPage(page = 1, pageSize?: number) {
-      this.recordsLoading = true;
-      try {
-        this.recordPage = await window.neuromark.llmUsage.getRecordPage(
-          page,
-          pageSize ?? this.recordPage?.pageSize ?? 20,
-        );
-        return this.recordPage;
-      } finally {
-        this.recordsLoading = false;
-      }
-    },
-    async savePricing(input: LlmPricingSettings) {
-      this.saving = true;
-      try {
-        const pricing = await window.neuromark.llmUsage.savePricing(input);
-        this.summary = await window.neuromark.llmUsage.getSummary();
-        this.recordPage = await window.neuromark.llmUsage.getRecordPage(
-          this.recordPage?.page ?? 1,
-          this.recordPage?.pageSize ?? 20,
-        );
-        return pricing;
-      } finally {
-        this.saving = false;
-      }
-    },
-  },
+    } finally {
+      if (current === requestId) loading.value = false;
+    }
+  }
+
+  return { calendar, loading, error, load };
 });

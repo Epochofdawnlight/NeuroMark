@@ -1,10 +1,17 @@
 import { ipcMain } from 'electron';
 import type { HistoryApi } from '@preload/history';
 import type { ProjectService } from '@main/services/projectService';
+import type { TaskManager } from '@main/services/taskManager';
 import { HistoryService } from '@main/services/history/historyService';
 
-export function registerHistoryIpc(projects: ProjectService): void {
-  const service = new HistoryService(projects);
+export function registerHistoryIpc(
+  projects: ProjectService,
+  tasks: TaskManager,
+): void {
+  const service = new HistoryService(projects, tasks);
+  void tasks
+    .recoverHistoryJobs()
+    .catch((error) => console.error('恢复按题阅卷任务失败', error));
   function handle<K extends keyof HistoryApi>(
     channel: string,
     method: K,
@@ -24,6 +31,10 @@ export function registerHistoryIpc(projects: ProjectService): void {
   handle('get-default-providers', 'getDefaultProviders');
   handle('save-default-provider', 'saveDefaultProvider');
   handle('test-default-provider', 'testDefaultProvider');
+  handle('list-model-profiles', 'listModelProfiles');
+  handle('save-model-profile', 'saveModelProfile');
+  handle('test-model-profile', 'testModelProfile');
+  handle('set-project-model', 'setProjectModel');
   handle('adopt-providers', 'adoptProviders');
   handle('preview-regions', 'previewRegions');
   handle('get-run', 'getRun');
@@ -33,6 +44,7 @@ export function registerHistoryIpc(projects: ProjectService): void {
   handle('save-draft', 'saveDraft');
   handle('start', 'start');
   handle('resume', 'resume');
+  handle('pause', 'pause');
   handle('preview', 'preview');
   handle('correct-transcript', 'correctTranscript');
   handle('audit', 'audit');

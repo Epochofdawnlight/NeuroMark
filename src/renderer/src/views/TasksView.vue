@@ -2,32 +2,65 @@
 import type { BackgroundJob } from '@preload/contracts';
 import { computed, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { NButton, NCard, NEmpty, NPopconfirm, NProgress } from 'naive-ui';
+import {
+  NButton,
+  NCard,
+  NEmpty,
+  NPopconfirm,
+  NProgress,
+  useMessage,
+} from 'naive-ui';
 import StatusPill from '@/components/StatusPill.vue';
 import { useTasksStore } from '@/stores/tasks';
 
 const route = useRoute();
 const router = useRouter();
 const tasksStore = useTasksStore();
+const message = useMessage();
 const expandedTaskIds = ref<Set<string>>(new Set());
 const showArchived = computed(() => route.name === 'tasks-archived');
-const tasks = computed(() => (showArchived.value ? tasksStore.archivedTasks : tasksStore.tasks));
+const tasks = computed(() =>
+  showArchived.value ? tasksStore.archivedTasks : tasksStore.tasks,
+);
 const archivableTasks = computed(() =>
-  tasksStore.tasks.filter((task) =>
-    task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled'
+  tasksStore.tasks.filter(
+    (task) =>
+      task.status === 'completed' ||
+      task.status === 'failed' ||
+      task.status === 'cancelled',
   ),
 );
-const pageEyebrow = computed(() => (showArchived.value ? '已归档后台任务' : '后台任务可持续运行'));
-const pageTitle = computed(() => (showArchived.value ? '已删除后台任务' : '后台任务页面'));
+const pageEyebrow = computed(() =>
+  showArchived.value ? '已归档后台任务' : '后台任务可持续运行',
+);
+const pageTitle = computed(() =>
+  showArchived.value ? '已删除后台任务' : '后台任务页面',
+);
 const pageCopy = computed(() =>
   showArchived.value
     ? '这里显示已经从前台清空的后台任务记录。归档不会影响任务原始结果，只是不再在默认任务页显示。'
     : '扫描、批阅与导出任务会常驻主进程运行，你可以随时切换页面查看结果，而不会中断后台进度。',
 );
 
-async function cancelTask(jobId: string) {
-  await window.neuromark.grading.cancel(jobId).catch(async () => {
-    await window.neuromark.scan.cancel(jobId);
+function isHistoryTask(task: BackgroundJob) {
+  return task.kind === 'history-trial' || task.kind === 'history-formal';
+}
+
+async function runHistoryAction(
+  task: BackgroundJob,
+  action: 'pause' | 'resume',
+) {
+  try {
+    await window.neuromark.history[action](task.projectId, task.id);
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : String(error));
+  }
+}
+
+async function cancelTask(task: BackgroundJob) {
+  if (isHistoryTask(task)) return runHistoryAction(task, 'pause');
+  await window.neuromark.grading.cancel(task.id).catch(async () => {
+    await window.neuromark.scan.cancel(task.id);
   });
 }
 
@@ -67,7 +100,11 @@ function getTaskFinishedAtLabel(task: BackgroundJob) {
 }
 
 function getTaskDisplayProgress(task: BackgroundJob) {
-  if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled') {
+  if (
+    task.status === 'completed' ||
+    task.status === 'failed' ||
+    task.status === 'cancelled'
+  ) {
     return 100;
   }
 
@@ -91,10 +128,15 @@ function getTaskArchivedAtLabel(task: BackgroundJob) {
 }
 
 function isTaskActive(task: BackgroundJob) {
-  return task.status === 'queued' || task.status === 'running' || task.status === 'paused';
+  return (
+    task.status === 'queued' ||
+    task.status === 'running' ||
+    task.status === 'paused'
+  );
 }
 
 function getTaskSpeedLabel(task: BackgroundJob) {
+  if (isHistoryTask(task)) return '按小题处理';
   if (task.kind === 'answer-generation') {
     return '按需请求';
   }
@@ -119,6 +161,8 @@ function getTaskSpeedLabel(task: BackgroundJob) {
 }
 
 function getTaskEtaLabel(task: BackgroundJob) {
+  if (isHistoryTask(task) && task.status === 'paused') return '可以继续';
+  if (isHistoryTask(task) && task.status === 'running') return '处理中';
   if (task.kind === 'answer-generation') {
     return task.eta || '等待模型返回';
   }
@@ -145,6 +189,8 @@ function getTaskEtaLabel(task: BackgroundJob) {
 }
 
 function getTaskKindLabel(task: BackgroundJob) {
+  if (task.kind === 'history-trial') return '按题试阅';
+  if (task.kind === 'history-formal') return '按题正式阅卷';
   if (task.kind === 'scan') {
     return '批量扫描任务';
   }
@@ -204,18 +250,10 @@ async function archiveVisibleTasks() {
         </p>
       </div>
       <div class="hero-actions">
-        <n-button
-          v-if="showArchived"
-          tertiary
-          @click="router.push('/tasks')"
-        >
+        <n-button v-if="showArchived" tertiary @click="router.push('/tasks')">
           返回后台任务
         </n-button>
-        <n-button
-          v-else
-          tertiary
-          @click="router.push('/tasks/archived')"
-        >
+        <n-button v-else tertiary @click="router.push('/tasks/archived')">
           查看已删除后台任务
         </n-button>
         <n-popconfirm
@@ -225,19 +263,14 @@ async function archiveVisibleTasks() {
           @positive-click="archiveVisibleTasks"
         >
           <template #trigger>
-            <n-button tertiary type="warning">
-              清空已结束任务
-            </n-button>
+            <n-button tertiary type="warning"> 清空已结束任务 </n-button>
           </template>
           只会清空已经结束的任务记录。正在进行中的任务会继续保留在当前列表，不会被隐藏。确认继续吗？
         </n-popconfirm>
       </div>
     </section>
 
-    <section
-      v-if="tasks.length"
-      class="task-list-layout"
-    >
+    <section v-if="tasks.length" class="task-list-layout">
       <n-card
         v-for="task in tasks"
         :key="task.id"
@@ -253,65 +286,45 @@ async function archiveVisibleTasks() {
         </template>
         <div class="task-list-card-body">
           <div class="task-list-card-main">
-            <div
-              v-if="isTaskExpanded(task.id)"
-              class="task-list-meta-grid"
-            >
+            <div v-if="isTaskExpanded(task.id)" class="task-list-meta-grid">
               <div class="task-list-meta-item">
-                <div class="task-list-meta-label">
-                  任务分组
-                </div>
+                <div class="task-list-meta-label">任务分组</div>
                 <div class="task-list-meta-value">
                   {{ task.projectName }}
                 </div>
               </div>
               <div class="task-list-meta-item task-list-meta-item--wide">
-                <div class="task-list-meta-label">
-                  当前对象
-                </div>
+                <div class="task-list-meta-label">当前对象</div>
                 <div class="task-list-meta-value">
                   {{ task.currentPaperLabel || '准备中' }}
                 </div>
               </div>
               <div class="task-list-meta-item">
-                <div class="task-list-meta-label">
-                  处理速度
-                </div>
+                <div class="task-list-meta-label">处理速度</div>
                 <div class="task-list-meta-value">
                   {{ getTaskSpeedLabel(task) }}
                 </div>
               </div>
               <div class="task-list-meta-item">
-                <div class="task-list-meta-label">
-                  预计完成
-                </div>
+                <div class="task-list-meta-label">预计完成</div>
                 <div class="task-list-meta-value">
                   {{ getTaskEtaLabel(task) }}
                 </div>
               </div>
               <div class="task-list-meta-item">
-                <div class="task-list-meta-label">
-                  开始时间
-                </div>
+                <div class="task-list-meta-label">开始时间</div>
                 <div class="task-list-meta-value">
                   {{ getTaskStartedAtLabel(task) }}
                 </div>
               </div>
               <div class="task-list-meta-item">
-                <div class="task-list-meta-label">
-                  结束时间
-                </div>
+                <div class="task-list-meta-label">结束时间</div>
                 <div class="task-list-meta-value">
                   {{ getTaskFinishedAtLabel(task) }}
                 </div>
               </div>
-              <div
-                v-if="showArchived"
-                class="task-list-meta-item"
-              >
-                <div class="task-list-meta-label">
-                  归档时间
-                </div>
+              <div v-if="showArchived" class="task-list-meta-item">
+                <div class="task-list-meta-label">归档时间</div>
                 <div class="task-list-meta-value">
                   {{ getTaskArchivedAtLabel(task) }}
                 </div>
@@ -332,28 +345,24 @@ async function archiveVisibleTasks() {
             </div>
 
             <div class="task-summary-panel">
-              <div
-                v-if="isTaskActive(task)"
-                class="task-summary-meta"
-              >
+              <div v-if="isTaskActive(task)" class="task-summary-meta">
                 <span class="task-list-meta-label">实时状态</span>
                 <span class="task-summary-meta-text">
-                  处理速度 {{ getTaskSpeedLabel(task) }} · 预计完成 {{ getTaskEtaLabel(task) }}
+                  处理速度 {{ getTaskSpeedLabel(task) }} · 预计完成
+                  {{ getTaskEtaLabel(task) }}
                 </span>
               </div>
-              <div class="task-list-meta-label">
-                任务摘要
-              </div>
+              <div class="task-list-meta-label">任务摘要</div>
               <p class="task-summary">
                 {{ task.summary }}
               </p>
               <template v-if="getTaskRuntimeLogs(task).length">
-                <div class="task-list-meta-label">
-                  最近日志
-                </div>
+                <div class="task-list-meta-label">最近日志</div>
                 <div
                   class="task-log-list"
-                  :class="{ 'task-log-list--scrollable': isTaskExpanded(task.id) }"
+                  :class="{
+                    'task-log-list--scrollable': isTaskExpanded(task.id),
+                  }"
                 >
                   <div
                     v-for="line in getTaskRuntimeLogs(task)"
@@ -370,18 +379,37 @@ async function archiveVisibleTasks() {
 
           <div class="task-list-card-actions">
             <n-button
+              v-if="isHistoryTask(task)"
               tertiary
-              @click="toggleTaskExpanded(task.id)"
+              @click="
+                router.push({
+                  name: 'project-detail',
+                  params: { projectId: task.projectId },
+                  query: { historyRun: task.id },
+                })
+              "
+              >查看阅卷批次</n-button
             >
+            <n-button
+              v-if="
+                !showArchived &&
+                isHistoryTask(task) &&
+                (task.status === 'paused' || task.status === 'failed')
+              "
+              tertiary
+              @click="runHistoryAction(task, 'resume')"
+              >继续或重试</n-button
+            >
+            <n-button tertiary @click="toggleTaskExpanded(task.id)">
               {{ isTaskExpanded(task.id) ? '收起详情' : '展开详情' }}
             </n-button>
             <n-button
               v-if="task.abortable && task.status === 'running'"
               tertiary
               type="error"
-              @click="cancelTask(task.id)"
+              @click="cancelTask(task)"
             >
-              终止任务
+              {{ isHistoryTask(task) ? '暂停阅卷' : '终止任务' }}
             </n-button>
           </div>
         </div>
@@ -389,14 +417,14 @@ async function archiveVisibleTasks() {
     </section>
     <n-empty
       v-else
-      :description="showArchived ? '当前还没有已归档的后台任务' : '当前没有正在跟踪的后台任务'"
+      :description="
+        showArchived
+          ? '当前还没有已归档的后台任务'
+          : '当前没有正在跟踪的后台任务'
+      "
     >
       <template #extra>
-        <n-button
-          v-if="showArchived"
-          tertiary
-          @click="router.push('/tasks')"
-        >
+        <n-button v-if="showArchived" tertiary @click="router.push('/tasks')">
           返回后台任务
         </n-button>
       </template>

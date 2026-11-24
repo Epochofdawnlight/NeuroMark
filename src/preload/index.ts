@@ -21,6 +21,13 @@ const api: NeuromarkApi = {
       ipcRenderer.invoke('history:save-default-provider', ...args),
     testDefaultProvider: (...args) =>
       ipcRenderer.invoke('history:test-default-provider', ...args),
+    listModelProfiles: () => ipcRenderer.invoke('history:list-model-profiles'),
+    saveModelProfile: (...args) =>
+      ipcRenderer.invoke('history:save-model-profile', ...args),
+    testModelProfile: (...args) =>
+      ipcRenderer.invoke('history:test-model-profile', ...args),
+    setProjectModel: (...args) =>
+      ipcRenderer.invoke('history:set-project-model', ...args),
     adoptProviders: (...args) =>
       ipcRenderer.invoke('history:adopt-providers', ...args),
     previewRegions: (...args) =>
@@ -36,6 +43,7 @@ const api: NeuromarkApi = {
     saveDraft: (...args) => ipcRenderer.invoke('history:save-draft', ...args),
     start: (...args) => ipcRenderer.invoke('history:start', ...args),
     resume: (...args) => ipcRenderer.invoke('history:resume', ...args),
+    pause: (...args) => ipcRenderer.invoke('history:pause', ...args),
     preview: (...args) => ipcRenderer.invoke('history:preview', ...args),
     correctTranscript: (...args) =>
       ipcRenderer.invoke('history:correct-transcript', ...args),
@@ -252,6 +260,8 @@ const api: NeuromarkApi = {
       ),
   },
   llmUsage: {
+    getHistoryCalendar: (query) =>
+      ipcRenderer.invoke('llm-usage:get-history-calendar', query),
     getSummary: () => ipcRenderer.invoke('llm-usage:get-summary'),
     getRecordPage: (page, pageSize) =>
       ipcRenderer.invoke('llm-usage:get-record-page', page, pageSize),

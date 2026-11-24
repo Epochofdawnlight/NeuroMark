@@ -5,8 +5,13 @@ import type { PaperRecord } from '@preload/contracts';
 import type { ChoiceGrid, HistoryDraft, HistoryRegion } from '@preload/history';
 import { toImageSrc } from '@/utils/file';
 
-const props = defineProps<{ papers: PaperRecord[]; disabled: boolean }>();
+const props = defineProps<{
+  papers: PaperRecord[];
+  disabled: boolean;
+  mode: 'handwritten' | 'omr';
+}>();
 const draft = defineModel<HistoryDraft>({ required: true });
+const handwritten = computed(() => props.mode === 'handwritten');
 const paperId = ref<string>();
 const pageIndex = ref(0);
 const selectedIds = ref<string[]>([]);
@@ -98,12 +103,21 @@ function rect(area: HistoryRegion) {
 </script>
 
 <template>
-  <n-card size="small" title="2B 选择题填涂区">
+  <n-card
+    size="small"
+    :title="handwritten ? '手写选择题作答区' : '2B 选择题填涂区'"
+  >
     <n-space vertical>
-      <n-alert type="info"
-        >只把 A–D
-        填涂格画进矩形，不要把题号栏算作一列。按纸面顺序选择题号。一张卡可以分多块画。</n-alert
-      >
+      <n-alert type="info">
+        <template v-if="handwritten">
+          框住学生填写 A–D
+          字母的位置。可以将间距相同的作答位置划为一块，再按纸面顺序选择题号。
+        </template>
+        <template v-else>
+          只框住 A–D
+          填涂格，框外留出题号栏。按纸面顺序选择题号。一张卡可以分多块画。
+        </template>
+      </n-alert>
       <div class="controls">
         <label
           >样卡
@@ -137,12 +151,22 @@ function rect(area: HistoryRegion) {
             "
         /></label>
         <label
-          >填涂排列
+          >作答区排列
           <n-select
             v-model:value="orientation"
             :options="[
-              { value: 'rows', label: '每题一行，A–D 从左到右' },
-              { value: 'columns', label: '每题一列，A–D 从上到下' },
+              {
+                value: 'rows',
+                label: handwritten
+                  ? '每题一行，题号从上到下'
+                  : '每题一行，A–D 从左到右',
+              },
+              {
+                value: 'columns',
+                label: handwritten
+                  ? '每题一列，题号从左到右'
+                  : '每题一列，A–D 从上到下',
+              },
             ]"
         /></label>
       </div>
@@ -171,7 +195,7 @@ function rect(area: HistoryRegion) {
         <img
           :src="toImageSrc(page.scannedPath, page.scannedVersion)"
           draggable="false"
-          alt="用于填涂标注的整张样卡"
+          alt="用于标注选择题作答区的整张样卡"
         />
         <div
           v-for="grid in grids.filter(
@@ -189,6 +213,7 @@ function rect(area: HistoryRegion) {
           :style="rect(region)"
         ></div>
       </div>
+      <p v-else>请先导入并扫描答题卡。</p>
       <n-button
         :disabled="
           disabled ||
@@ -199,7 +224,7 @@ function rect(area: HistoryRegion) {
         "
         type="primary"
         @click="save"
-        >添加此填涂区</n-button
+        >添加此作答区</n-button
       >
       <n-space v-for="(grid, index) in grids" :key="grid.id" align="center">
         <span
