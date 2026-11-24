@@ -34,6 +34,10 @@ const api: NeuromarkApi = {
       ipcRenderer.invoke('history:preview-regions', ...args),
     get: (...args) => ipcRenderer.invoke('history:get', ...args),
     getRun: (...args) => ipcRenderer.invoke('history:get-run', ...args),
+    saveIdentitySetup: (...args) =>
+      ipcRenderer.invoke('history:save-identity-setup', ...args),
+    recognizeIdentities: (...args) =>
+      ipcRenderer.invoke('history:recognize-identities', ...args),
     bindStudent: (...args) =>
       ipcRenderer.invoke('history:bind-student', ...args),
     saveProviders: (...args) =>

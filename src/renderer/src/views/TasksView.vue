@@ -136,6 +136,7 @@ function isTaskActive(task: BackgroundJob) {
 }
 
 function getTaskSpeedLabel(task: BackgroundJob) {
+  if (task.kind === 'history-identity') return '按答卷识别';
   if (isHistoryTask(task)) return '按小题处理';
   if (task.kind === 'answer-generation') {
     return '按需请求';
@@ -161,6 +162,7 @@ function getTaskSpeedLabel(task: BackgroundJob) {
 }
 
 function getTaskEtaLabel(task: BackgroundJob) {
+  if (task.kind === 'history-identity' && task.status === 'running') return '识别中';
   if (isHistoryTask(task) && task.status === 'paused') return '可以继续';
   if (isHistoryTask(task) && task.status === 'running') return '处理中';
   if (task.kind === 'answer-generation') {
@@ -189,6 +191,7 @@ function getTaskEtaLabel(task: BackgroundJob) {
 }
 
 function getTaskKindLabel(task: BackgroundJob) {
+  if (task.kind === 'history-identity') return '考生学号识别';
   if (task.kind === 'history-trial') return '按题试阅';
   if (task.kind === 'history-formal') return '按题正式阅卷';
   if (task.kind === 'scan') {

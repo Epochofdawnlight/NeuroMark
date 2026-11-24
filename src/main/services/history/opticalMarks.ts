@@ -44,22 +44,38 @@ export async function readOpticalMarks(
   orientation: ChoiceGrid['orientation'],
 ): Promise<OpticalMark> {
   const buffer = Buffer.from(image.split(',')[1], 'base64');
-  const { data, info } = await sharp(buffer)
+  const raw = await decodeOpticalGrid(buffer);
+  const mark = readOpticalGridCell(raw, orientation, 0, 1);
+  if (!mark) throw new Error('填涂题框过小，无法辨认选项。');
+  return mark;
+}
+
+export function decodeOpticalGrid(buffer: Buffer) {
+  return sharp(buffer)
     .grayscale()
     .removeAlpha()
     .raw()
     .toBuffer({ resolveWithObject: true });
+}
+
+export function readOpticalGridCell(
+  { data, info }: Awaited<ReturnType<typeof decodeOpticalGrid>>,
+  orientation: ChoiceGrid['orientation'],
+  index: number,
+  count: number,
+): OpticalMark | undefined {
   const { width, height, channels } = info;
   const horizontal = orientation === 'rows';
   const cell = (horizontal ? width : height) / 4;
-  if (cell < 6 || (horizontal ? height : width) < 6)
-    throw new Error('填涂题框过小，无法辨认选项。');
-  const marks = choiceOptions.map((_, index) => {
-    const across = horizontal ? height : width;
-    const startAxis = Math.ceil((index + 0.2) * cell);
-    const endAxis = Math.floor((index + 0.8) * cell);
-    const startAcross = Math.ceil(across * 0.19);
-    const endAcross = Math.floor(across * 0.81);
+  const questionAxis = horizontal ? height : width;
+  const offset = Math.floor((index * questionAxis) / count);
+  const across = Math.ceil(((index + 1) * questionAxis) / count) - offset;
+  if (cell < 6 || across < 6) return undefined;
+  const startAcross = offset + Math.ceil(across * 0.19);
+  const endAcross = offset + Math.floor(across * 0.81);
+  const marks = choiceOptions.map((_, option) => {
+    const startAxis = Math.ceil((option + 0.2) * cell);
+    const endAxis = Math.floor((option + 0.8) * cell);
     const pixels: number[] = [];
     for (let axis = startAxis; axis < endAxis; axis += 1) {
       for (let cross = startAcross; cross < endAcross; cross += 1) {

@@ -110,12 +110,11 @@ function rect(area: HistoryRegion) {
     <n-space vertical>
       <n-alert type="info">
         <template v-if="handwritten">
-          框住学生填写 A–D
-          字母的位置。可以将间距相同的作答位置划为一块，再按纸面顺序选择题号。
+          框住整列或整行手写作答格，题号按纸面顺序关联。相隔较远的区域可以分开画，同一份卷的所有区域一次识别。
         </template>
         <template v-else>
-          只框住 A–D
-          填涂格，框外留出题号栏。按纸面顺序选择题号。一张卡可以分多块画。
+          框住一整栏或一整排等距的 A–D
+          填涂格，题号印刷栏留在框外。多栏可分别框选，系统在本机批量读取。
         </template>
       </n-alert>
       <div class="controls">
@@ -180,6 +179,14 @@ function rect(area: HistoryRegion) {
           :options="unused.map((item) => ({ label: item.id, value: item.id }))"
           placeholder="选择此矩形包含的题号"
       /></label>
+      <n-button
+        v-if="unused.length > 1"
+        size="small"
+        :disabled="disabled"
+        @click="selectedIds = unused.map((item) => item.id)"
+      >
+        按题号顺序选中全部未标注题目
+      </n-button>
       <div
         v-if="page?.scannedPath"
         ref="board"

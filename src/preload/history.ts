@@ -9,6 +9,25 @@ export interface HistoryRegion {
   height: number;
 }
 
+export interface HistoryIdentitySetup {
+  rosterText: string;
+  region?: HistoryRegion;
+}
+
+export interface HistoryIdentityResult {
+  paperId: string;
+  paperCode: string;
+  status:
+    | 'matched'
+    | 'unmatched'
+    | 'unreadable'
+    | 'already-bound'
+    | 'duplicate';
+  studentId?: string;
+  name?: string;
+  message?: string;
+}
+
 export interface HistoryCriterion {
   id: string;
   text: string;
@@ -69,7 +88,7 @@ export interface ExamMaterialFile {
 }
 
 export interface HistoryDraft {
-  phase?: 'catalog' | 'regions' | 'choice' | 'rubric' | 'ready';
+  phase?: 'identity' | 'catalog' | 'regions' | 'choice' | 'rubric' | 'ready';
   choiceMode?: 'none' | 'handwritten' | 'omr';
   fullPageRegionsConfirmed?: boolean;
   reference: string;
@@ -148,6 +167,7 @@ export interface HistoryRow {
   opticalMark?: OpticalMark;
   choiceOrientation?: ChoiceGrid['orientation'];
   choiceMode?: 'handwritten' | 'omr';
+  choiceGridSource?: HistorySource;
   grade?: HistoryGrade;
   suggestedGrade?: HistoryGrade;
   error?: string;
@@ -213,6 +233,10 @@ export interface HistorySnapshot {
   report: HistoryReport[];
   pastRuns: Omit<HistoryRun, 'rows' | 'draft'>[];
   identities: Record<string, { studentId: string; name: string }>;
+  identitySetup?: HistoryIdentitySetup;
+  identityResults?: HistoryIdentityResult[];
+  identityStatus?: 'running' | 'completed' | 'failed';
+  identityError?: string;
 }
 
 export interface HistoryRowRef {
@@ -256,6 +280,14 @@ export interface HistoryApi {
   ) => Promise<string[]>;
   get: (projectId: string) => Promise<HistorySnapshot>;
   getRun: (projectId: string, runId: string) => Promise<HistoryRun>;
+  saveIdentitySetup: (
+    projectId: string,
+    setup: HistoryIdentitySetup,
+  ) => Promise<void>;
+  recognizeIdentities: (
+    projectId: string,
+    setup: HistoryIdentitySetup,
+  ) => Promise<void>;
   bindStudent: (
     projectId: string,
     paperId: string,

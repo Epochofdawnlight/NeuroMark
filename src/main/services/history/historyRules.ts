@@ -47,7 +47,9 @@ export const rubricProposalSchema = z.object({
 });
 
 const draftSchema = z.object({
-  phase: z.enum(['catalog', 'regions', 'choice', 'rubric', 'ready']).optional(),
+  phase: z
+    .enum(['identity', 'catalog', 'regions', 'choice', 'rubric', 'ready'])
+    .optional(),
   fullPageRegionsConfirmed: z.boolean().optional(),
   choiceMode: z.enum(['none', 'handwritten', 'omr']).optional(),
   reference: z.string().trim(),
@@ -110,7 +112,11 @@ export function validateHistoryDraft(
   const draft = draftSchema.parse(input);
   const ready = draft.phase === undefined || draft.phase === 'ready';
   if (requireReady && !ready) throw new Error('请先确认评分细则，再开始试阅。');
-  if (draft.phase === 'catalog' && !draft.questions.length) return draft;
+  if (
+    (draft.phase === 'identity' || draft.phase === 'catalog') &&
+    !draft.questions.length
+  )
+    return draft;
   if (!draft.questions.length) throw new Error('请添加至少一道小题。');
   const ids = new Set(draft.questions.map((q) => q.id));
   if (ids.size !== draft.questions.length)

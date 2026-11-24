@@ -11,7 +11,10 @@ import {
   DEFAULT_HISTORY_CONCURRENCY,
   MAX_HISTORY_CONCURRENCY,
 } from '@preload/history';
+import { parseHistoryRoster } from '@preload/historyRoster';
 import type {
+  HistoryIdentityResult,
+  HistoryIdentitySetup,
   HistoryDraft,
   ExamMaterialFile,
   OpticalMark,
@@ -36,6 +39,7 @@ import {
 } from './historyRules';
 import {
   cropHistorySource,
+  cropHistorySourceBuffer,
   gradeHistoryAnswer,
   gradeHistoryImage,
   readHandwrittenChoice,
@@ -53,6 +57,11 @@ import {
   gradeOpticalMark,
   readOpticalMarks,
 } from './opticalMarks';
+import {
+  readChoiceGrid,
+  readHandwrittenChoiceGrids,
+} from './choiceGridRecognition';
+import { matchExamStudents, readExamStudentId } from './examIdentity';
 import {
   DEFAULT_HISTORY_TIMEOUT_SECONDS,
   readHistoryProfiles,
@@ -85,6 +94,10 @@ interface Workspace {
   pastRuns: HistoryRun[];
   transcriptions: Record<string, HistoryTranscript>;
   identities: Record<string, Identity>;
+  identitySetup?: HistoryIdentitySetup;
+  identityResults?: HistoryIdentityResult[];
+  identityStatus?: HistorySnapshot['identityStatus'];
+  identityError?: string;
 }
 
 function emptyWorkspace(): Workspace {
@@ -253,12 +266,13 @@ function buildRows(papers: PaperRecord[], draft: HistoryDraft): HistoryRow[] {
     draft.questions.map((question) => {
       const regions = regionsForQuestion(draft, paper.id, question);
       const sources = sourcesForRegions(paper, regions);
-      const choiceOrientation =
+      const grid =
         question.kind === 'choice'
           ? draft.choiceGrids?.find((grid) =>
               grid.questionIds.includes(question.id),
-            )?.orientation
+            )
           : undefined;
+      const choiceOrientation = grid?.orientation;
       const choiceMode = choiceOrientation
         ? draft.choiceMode === 'handwritten'
           ? 'handwritten'
@@ -279,6 +293,7 @@ function buildRows(papers: PaperRecord[], draft: HistoryDraft): HistoryRow[] {
         ),
         choiceOrientation,
         choiceMode,
+        choiceGridSource: grid && sourcesForRegions(paper, [grid.region])[0],
         status: missing ? 'error' : 'pending',
         error: !regions.length
           ? '这道小题还没有作答区域。请在答题区域工作台补画。'
@@ -329,6 +344,9 @@ async function reuseTrialRows(
       draft.material !== prior.draft.material)
   )
     return rows;
+  const sameChoiceGrids =
+    JSON.stringify(draft.choiceGrids) ===
+    JSON.stringify(prior.draft.choiceGrids);
   const unchanged = new Set(
     draft.questions
       .filter((question) => {
@@ -337,6 +355,7 @@ async function reuseTrialRows(
         );
         return (
           previous &&
+          (question.kind !== 'choice' || sameChoiceGrids) &&
           question.kind === previous.kind &&
           question.answerKey === previous.answerKey &&
           question.reference === previous.reference &&
@@ -390,6 +409,7 @@ async function reuseTrialRows(
 
 export class HistoryService {
   private active = new Set<string>();
+  private activeIdentities = new Set<string>();
   private controllers = new Map<
     string,
     { runId: string; controller: AbortController }
@@ -634,7 +654,11 @@ export class HistoryService {
     await this.projects.getProjectById(projectId);
     const draft = validateHistoryDraft(input);
     if (!draft.questions.length) throw new Error('请先确认题号。');
-    if (!draft.material.trim() && !draft.reference.trim())
+    if (
+      !draft.material.trim() &&
+      !draft.reference.trim() &&
+      !draft.questions.some((question) => question.maxScore > 0)
+    )
       throw new Error('请先输入试卷、答案或评分说明。');
     return organizeExamRubric(
       connectionFor(
@@ -673,6 +697,8 @@ export class HistoryService {
   private ensureIdle(projectId: string): void {
     if (this.active.has(projectId))
       throw new Error('该项目已有历史批阅任务在运行。');
+    if (this.activeIdentities.has(projectId))
+      throw new Error('该项目正在识别考生学号，请等待后台任务结束。');
   }
 
   private shownRun(
@@ -689,6 +715,9 @@ export class HistoryService {
     const state = this.load(projectId);
     const saved = this.savedDefaults();
     const providers = this.effectiveProviders(state, saved);
+    const identityInterrupted =
+      state.identityStatus === 'running' &&
+      !this.activeIdentities.has(projectId);
     const needsRegionReview =
       !state.draft.fullPageRegionsConfirmed &&
       state.draft.questions.length > 0 &&
@@ -712,6 +741,12 @@ export class HistoryService {
         ? state.approvedTrialId
         : undefined,
       identities: state.identities,
+      identitySetup: state.identitySetup,
+      identityResults: state.identityResults,
+      identityStatus: identityInterrupted ? 'failed' : state.identityStatus,
+      identityError: identityInterrupted
+        ? '学号识别已中断，请重新运行。'
+        : state.identityError,
       trial: this.shownRun(projectId, state.trial),
       formal: this.shownRun(projectId, state.formal),
       report: state.trial
@@ -726,6 +761,217 @@ export class HistoryService {
   async getRun(projectId: string, runId: string): Promise<HistoryRun> {
     await this.projects.getProjectById(projectId);
     return this.shownRun(projectId, findRun(this.load(projectId), runId))!;
+  }
+
+  private identitySetup(input: HistoryIdentitySetup): HistoryIdentitySetup {
+    if (typeof input.rosterText !== 'string')
+      throw new Error('请粘贴学号和姓名名单。');
+    const rosterText = input.rosterText.trim();
+    return {
+      rosterText,
+      region: historyRegionsSchema.parse(input.region ? [input.region] : [])[0],
+    };
+  }
+
+  async saveIdentitySetup(projectId: string, input: HistoryIdentitySetup) {
+    await this.projects.getProjectById(projectId);
+    this.ensureIdle(projectId);
+    const setup = this.identitySetup(input);
+    if (setup.rosterText) parseHistoryRoster(setup.rosterText);
+    const state = this.load(projectId);
+    if (JSON.stringify(setup) === JSON.stringify(state.identitySetup)) return;
+    state.identitySetup = setup;
+    state.identityStatus = undefined;
+    state.identityError = undefined;
+    state.identityResults = undefined;
+    this.write(projectId, state);
+  }
+
+  async recognizeIdentities(projectId: string, input: HistoryIdentitySetup) {
+    const project = await this.projects.getProjectById(projectId);
+    const papers = await this.projects.listProjectPapers(projectId);
+    this.ensureIdle(projectId);
+    const setup = this.identitySetup(input);
+    const roster = parseHistoryRoster(setup.rosterText);
+    const region = setup.region;
+    if (!region) throw new Error('请先框选学号区域。');
+    if (!papers.some((paper) => sourcesForRegions(paper, [region]).length))
+      throw new Error('请先准备含学号区域的整页答题卡。');
+    const state = this.load(projectId);
+    const model = connectionFor(
+      this.effectiveProviders(state).recognition,
+      projectId,
+    );
+    const controller = new AbortController();
+    this.activeIdentities.add(projectId);
+    let jobId: string | undefined;
+    try {
+      if (this.tasks) {
+        jobId = (
+          await this.tasks.createJob({
+            kind: 'history-identity',
+            projectId,
+            projectName: project.name,
+            status: 'running',
+            abortable: true,
+            summary: '正在读取考生学号',
+          })
+        ).id;
+        this.tasks.trackHistoryJob(jobId, controller);
+      }
+      state.identitySetup = setup;
+      state.identityStatus = 'running';
+      state.identityError = undefined;
+      state.identityResults = undefined;
+      this.write(projectId, state);
+    } catch (error) {
+      this.activeIdentities.delete(projectId);
+      if (jobId) this.tasks?.trackHistoryJob(jobId);
+      throw error;
+    }
+    void this.processIdentities(
+      projectId,
+      state,
+      papers,
+      region,
+      roster,
+      {
+        ...model,
+        signal: controller.signal,
+      },
+      jobId,
+    );
+  }
+
+  private async processIdentities(
+    projectId: string,
+    state: Workspace,
+    papers: PaperRecord[],
+    region: HistoryRegion,
+    roster: ReturnType<typeof parseHistoryRoster>,
+    model: HistoryConnection,
+    jobId: string | undefined,
+  ) {
+    const results: HistoryIdentityResult[] = [];
+    let next = 0;
+    let failures = 0;
+    let lastTaskUpdate = 0;
+    const updateJob = async (
+      status: 'running' | 'completed' | 'failed' | 'cancelled',
+      summary: string,
+    ) => {
+      if (!jobId) return;
+      await this.tasks
+        ?.updateJob(jobId, {
+          status,
+          abortable: status === 'running',
+          progress: results.length / papers.length,
+          summary,
+        })
+        .catch((error) => console.warn('无法更新学号识别任务', error));
+    };
+    try {
+      const work = async () => {
+        while (!model.signal?.aborted) {
+          const paper = papers[next++];
+          if (!paper) return;
+          const base = { paperId: paper.id, paperCode: paper.paperCode };
+          const bound = state.identities[paper.id];
+          const source = sourcesForRegions(paper, [region])[0];
+          let result: HistoryIdentityResult;
+          try {
+            if (bound?.studentId || bound?.name)
+              result = { ...base, ...bound, status: 'already-bound' };
+            else if (!source)
+              result = {
+                ...base,
+                status: 'unreadable',
+                message: '学号所在页面尚未准备。',
+              };
+            else {
+              const value = await readExamStudentId(
+                model,
+                await cropHistorySource(source),
+              );
+              result = {
+                ...base,
+                ...value,
+                status: value.studentId ? 'unmatched' : 'unreadable',
+              };
+            }
+          } catch (error) {
+            if (model.signal?.aborted) return;
+            failures += 1;
+            result = {
+              ...base,
+              status: 'unreadable',
+              message:
+                error instanceof Error ? error.message : '学号识别失败。',
+            };
+          }
+          results.push(result);
+          if (Date.now() - lastTaskUpdate >= 300) {
+            lastTaskUpdate = Date.now();
+            await updateJob(
+              'running',
+              `已处理 ${results.length}/${papers.length} 份答卷`,
+            );
+          }
+        }
+      };
+      await Promise.all(
+        Array.from(
+          { length: Math.min(papers.length, DEFAULT_HISTORY_CONCURRENCY) },
+          work,
+        ),
+      );
+      if (model.signal?.aborted)
+        throw new Error('学号识别已取消，可重新运行。');
+      const ordered = new Map(
+        results.map((result) => [result.paperId, result]),
+      );
+      state.identityResults = matchExamStudents(
+        papers.map((paper) => ordered.get(paper.id)!),
+        roster,
+        state.identities,
+      );
+      for (const result of state.identityResults) {
+        if (result.status === 'matched' && result.studentId && result.name)
+          state.identities[result.paperId] = {
+            studentId: result.studentId,
+            name: result.name,
+          };
+      }
+      const matched = state.identityResults.filter(
+        (result) =>
+          result.status === 'matched' || result.status === 'already-bound',
+      ).length;
+      state.identityStatus =
+        failures === papers.length ? 'failed' : 'completed';
+      if (state.identityStatus === 'failed')
+        state.identityError = '本轮学号识别请求均失败，详情见答卷列表。';
+      this.write(projectId, state);
+      await updateJob(
+        state.identityStatus,
+        `已核名 ${matched}/${papers.length} 份答卷`,
+      );
+    } catch (error) {
+      state.identityStatus = 'failed';
+      state.identityError =
+        error instanceof Error ? error.message : '学号识别任务失败。';
+      try {
+        this.write(projectId, state);
+      } catch (writeError) {
+        console.warn('无法保存学号识别结果', writeError);
+      }
+      await updateJob(
+        model.signal?.aborted ? 'cancelled' : 'failed',
+        state.identityError,
+      );
+    } finally {
+      this.activeIdentities.delete(projectId);
+      if (jobId) this.tasks?.trackHistoryJob(jobId);
+    }
   }
 
   async bindStudent(
@@ -751,6 +997,17 @@ export class HistoryService {
       ...state.identities,
       [paperId]: { studentId, name: name.trim() },
     };
+    const identity = state.identityResults?.find(
+      (result) => result.paperId === paperId,
+    );
+    if (identity && (studentId || name.trim())) {
+      Object.assign(identity, {
+        studentId,
+        name: name.trim(),
+        status: 'already-bound',
+        message: undefined,
+      });
+    }
     this.write(projectId, state);
   }
 
@@ -1052,6 +1309,36 @@ export class HistoryService {
       const pending = run.rows
         .filter((row) => row.status === 'pending')
         .sort((a, b) => order.get(a.questionId)! - order.get(b.questionId)!);
+      const choiceRows = new Map<string, Map<string, HistoryRow>>();
+      for (const row of run.rows) {
+        if (!row.choiceGridSource) continue;
+        let byQuestion = choiceRows.get(row.paperId);
+        if (!byQuestion) {
+          byQuestion = new Map();
+          choiceRows.set(row.paperId, byQuestion);
+        }
+        byQuestion.set(row.questionId, row);
+      }
+      const choiceReads = new Map<
+        string,
+        Promise<Map<string, OpticalMark | Error>>
+      >();
+      async function groupMark(
+        service: HistoryService,
+        row: HistoryRow,
+      ): Promise<OpticalMark> {
+        const rows = choiceRows.get(row.paperId);
+        if (!rows || !row.choiceGridSource)
+          return service.readChoice(projectId, run, row, model);
+        let batch = choiceReads.get(row.paperId);
+        if (!batch) {
+          batch = service.readPaperChoices(projectId, run, rows, model);
+          choiceReads.set(row.paperId, batch);
+        }
+        const mark = (await batch).get(row.questionId);
+        if (mark instanceof Error) throw mark;
+        return mark ?? { status: 'uncertain', marks: [] };
+      }
       let next = 0;
       let writeFailed = false;
       let lastTaskUpdate = 0;
@@ -1064,7 +1351,7 @@ export class HistoryService {
             if (row.choiceOrientation) {
               const mark = manual
                 ? this.manualMark(manual.text)
-                : await this.readChoice(projectId, run, row, model);
+                : await groupMark(this, row);
               this.gradeChoiceRow(row, mark, run);
             } else {
               await this.gradeImageRow(
@@ -1155,6 +1442,94 @@ export class HistoryService {
     if (value.status === 'single' || value.status === 'blank')
       saveCachedResult(projectId, key, { kind: 'choice', value });
     return value;
+  }
+
+  private async readPaperChoices(
+    projectId: string,
+    run: HistoryRun,
+    rows: Map<string, HistoryRow>,
+    model: HistoryConnection,
+  ): Promise<Map<string, OpticalMark | Error>> {
+    const marks = new Map<string, OpticalMark | Error>();
+    const grids = await Promise.all(
+      (run.draft.choiceGrids ?? []).map(
+        async ({ orientation, questionIds }) => {
+          const source = questionIds
+            .map((id) => rows.get(id)?.choiceGridSource)
+            .find((entry) => entry !== undefined);
+          if (!source) return;
+          try {
+            return {
+              orientation,
+              questionIds,
+              buffer: await cropHistorySourceBuffer(source),
+            };
+          } catch (error) {
+            const failure =
+              error instanceof Error
+                ? error
+                : new Error('无法裁取选择题区域。');
+            for (const id of questionIds) marks.set(id, failure);
+          }
+        },
+      ),
+    );
+    const ready = grids.filter((grid) => grid !== undefined);
+    if (!ready.length) return marks;
+    if (run.draft.choiceMode === 'handwritten') {
+      const key = this.resultKey(run, {
+        handwrittenGrids: ready.map(({ buffer, questionIds, orientation }) => ({
+          content: createHash('sha256').update(buffer).digest('hex'),
+          questionIds,
+          orientation,
+        })),
+      });
+      const cached = findCachedResult(projectId, key);
+      if (cached?.kind === 'choice-regions') {
+        recordHistoryUsage({
+          projectId,
+          model: model.model,
+          operation: '手写选择题整组识别',
+          durationMs: 0,
+          outcome: 'success',
+          cacheHit: true,
+        });
+        for (const [id, mark] of cached.value) marks.set(id, mark);
+      } else {
+        try {
+          const batch = await readHandwrittenChoiceGrids(ready, model);
+          for (const [id, mark] of batch) marks.set(id, mark);
+          if (
+            [...batch.values()].every(
+              (mark) => mark.status === 'single' || mark.status === 'blank',
+            )
+          )
+            saveCachedResult(projectId, key, {
+              kind: 'choice-regions',
+              value: [...batch],
+            });
+        } catch (error) {
+          const failure =
+            error instanceof Error ? error : new Error('手写选择题识别失败。');
+          for (const { questionIds } of ready)
+            for (const id of questionIds) marks.set(id, failure);
+        }
+      }
+    } else {
+      for (const { buffer, orientation, questionIds } of ready) {
+        try {
+          const batch = await readChoiceGrid(buffer, orientation, questionIds, {
+            mode: 'omr',
+          });
+          for (const [id, mark] of batch) marks.set(id, mark);
+        } catch (error) {
+          const failure =
+            error instanceof Error ? error : new Error('2B 填涂识别失败。');
+          for (const id of questionIds) marks.set(id, failure);
+        }
+      }
+    }
+    return marks;
   }
 
   private resultKey(run: HistoryRun, input: object) {
@@ -1433,19 +1808,11 @@ export class HistoryService {
       throw new Error('请对当前细则和模型配置重新试阅。');
     }
     if (
-      trial.draft.questions.some(
-        (q) => !trial.rows.some((row) => row.questionId === q.id && row.audit),
+      !trial.rows.some(
+        (row) => row.status === 'scored' || row.status === 'blank' || row.audit,
       )
-    ) {
-      throw new Error('每道小题至少需要确认一份抽检记录。');
-    }
-    if (
-      trial.rows.some(
-        (row) => ['error', 'unreadable'].includes(row.status) && !row.audit,
-      )
-    ) {
-      throw new Error('请先处理试阅中的识别异常和失败项。');
-    }
+    )
+      throw new Error('这轮试阅没有可审阅的结果，请处理失败原因后重新试阅。');
     state.approvedTrialId = trial.id;
     this.write(projectId, state);
   }

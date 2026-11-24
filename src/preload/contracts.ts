@@ -4,6 +4,7 @@ export type JobKind =
   | 'scan'
   | 'grading'
   | 'history-trial'
+  | 'history-identity'
   | 'history-formal'
   | 'answer-generation'
   | 'result-pdf-export';

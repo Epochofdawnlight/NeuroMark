@@ -20,12 +20,14 @@ import {
 } from '@preload/history';
 import type {
   HistoryDraft,
+  HistoryReport,
   HistoryRowRef,
   HistoryRun,
   HistorySnapshot,
 } from '@preload/history';
 import { mergeQuestionCatalog } from '@preload/examDraft';
 import HistoryCatalog from './HistoryCatalog.vue';
+import HistoryIdentity from './HistoryIdentity.vue';
 import HistoryReview from './HistoryReview.vue';
 import HistoryRegions from './HistoryRegions.vue';
 import ChoiceGridEditor from './ChoiceGridEditor.vue';
@@ -48,6 +50,7 @@ const draftRevision = ref(0);
 const sampleSize = ref<number | null>(10);
 const concurrency = ref<number | null>(DEFAULT_HISTORY_CONCURRENCY);
 type View =
+  | 'identity'
   | 'catalog'
   | 'regions'
   | 'choice'
@@ -55,7 +58,13 @@ type View =
   | 'trial'
   | 'formal'
   | 'archive';
-const view = ref<View>('catalog');
+const view = ref<View>('identity');
+const trialRevisionRequest = ref<{
+  runId: string;
+  questionId: string;
+  text: string;
+}>();
+const showTrialScripts = ref(false);
 const choiceQuestions = computed(() =>
   draft.value.questions.filter((item) => item.kind === 'choice'),
 );
@@ -87,6 +96,7 @@ const canConfirmChoice = computed(() => {
   );
 });
 const steps = [
+  { id: 'identity', title: '考生身份' },
   { id: 'catalog', title: '上传与识别' },
   { id: 'regions', title: '主观题切框' },
   { id: 'choice', title: '选择题设置' },
@@ -94,8 +104,13 @@ const steps = [
   { id: 'trial', title: '试阅抽检' },
   { id: 'formal', title: '正式阅卷' },
 ] as const;
+function initialPhase(current: HistoryDraft) {
+  return current.phase ?? (current.questions.length ? 'catalog' : 'identity');
+}
 const unlocked = computed(() => {
-  const phase = snapshot.value?.draft.phase ?? 'catalog';
+  const phase = snapshot.value
+    ? initialPhase(snapshot.value.draft)
+    : 'identity';
   const step =
     phase === 'ready'
       ? snapshot.value?.approvedTrialId
@@ -133,6 +148,9 @@ const activeRun = computed(() =>
         ? archived.value
         : undefined,
 );
+const currentTrial = computed(
+  () => snapshot.value?.trial?.revision === snapshot.value?.revision,
+);
 const statusLabel: Record<HistoryRun['status'], string> = {
   running: '批阅中',
   paused: '已暂停',
@@ -151,16 +169,13 @@ async function refresh(reloadDraft = false) {
         current.formal?.concurrency ??
         current.trial?.concurrency ??
         DEFAULT_HISTORY_CONCURRENCY;
-      switch (current.draft.phase) {
-        case 'regions':
-        case 'choice':
-        case 'rubric':
-          view.value = current.draft.phase;
-          break;
-        case 'ready':
-          view.value = current.approvedTrialId ? 'formal' : 'trial';
-          break;
-      }
+      const phase = initialPhase(current.draft);
+      view.value =
+        phase === 'ready'
+          ? current.approvedTrialId
+            ? 'formal'
+            : 'trial'
+          : phase;
     }
     if (!snapshot.value || reloadDraft) {
       draft.value = structuredClone(current.draft);
@@ -264,6 +279,51 @@ function saveCurrentDraft() {
     return savePhase({ ...draft.value, phase }, phase, '草稿已保存');
 }
 
+function completeIdentity() {
+  if (!snapshot.value) return;
+  if (initialPhase(snapshot.value.draft) === 'identity') {
+    return savePhase({ ...draft.value, phase: 'catalog' }, 'catalog');
+  }
+  view.value = 'catalog';
+}
+
+async function identityUpdated() {
+  emit('papersChanged');
+  await refresh();
+}
+
+async function confirmRubric() {
+  await savePhase(
+    { ...draft.value, phase: 'ready' },
+    'trial',
+    '评分细则已确认',
+  );
+  if (view.value === 'trial') trialRevisionRequest.value = undefined;
+}
+
+function reviseTrialQuestion(item: HistoryReport) {
+  const run = snapshot.value?.trial;
+  if (!run || !draft.value.questions.some(({ id }) => id === item.questionId))
+    return;
+  const distribution = item.distribution
+    .map(({ score, count }) => `${score} 分 ${count} 份`)
+    .join('、');
+  const points = item.points
+    .map(({ text, hit, full }) => `${text}（命中 ${hit} 份，满分 ${full} 份）`)
+    .join('\n');
+  trialRevisionRequest.value = {
+    runId: run.id,
+    questionId: item.questionId,
+    text:
+      `请修订第 ${item.questionId} 题的评分细则。\n` +
+      `试阅使用细则 v${run.revision}，抽取 ${item.sampled} 份，已计分 ${item.graded} 份，均分 ${item.mean?.toFixed(2) ?? '暂无'}，空白 ${item.blank} 份，辨认不清 ${item.unreadable} 份，失败 ${item.failed} 份。\n` +
+      (distribution ? `分数分布：${distribution}。\n` : '') +
+      (points ? `采分点表现：\n${points}\n` : '') +
+      '\n我的修改要求：',
+  };
+  view.value = 'rubric';
+}
+
 function approveTrial() {
   const trial = snapshot.value?.trial;
   if (!trial) return;
@@ -286,6 +346,7 @@ async function exportRun(run: HistoryRun) {
 async function openArchive(id: string) {
   await act(async () => {
     archived.value = await api.getRun(props.projectId, id);
+    view.value = 'archive';
   });
 }
 
@@ -318,7 +379,11 @@ onBeforeUnmount(() => {
           v-for="(step, index) in steps"
           :key="step.id"
           :type="view === step.id ? 'primary' : 'default'"
-          :disabled="busy || rubricBusy || index > unlocked"
+          :disabled="
+            busy ||
+            rubricBusy ||
+            (index > unlocked && !(step.id === 'trial' && snapshot.trial))
+          "
           @click="view = step.id"
           >{{ index + 1 }}. {{ step.title }}</n-button
         >
@@ -380,6 +445,15 @@ onBeforeUnmount(() => {
           >迁移项目中已保存的模型</n-button
         >
       </n-space>
+      <HistoryIdentity
+        v-if="view === 'identity'"
+        :project-id="projectId"
+        :snapshot="snapshot"
+        :papers="papers"
+        :disabled="busy || running"
+        @next="completeIdentity"
+        @updated="identityUpdated"
+      />
       <HistoryCatalog
         v-if="view === 'catalog'"
         v-model="draft"
@@ -463,7 +537,7 @@ onBeforeUnmount(() => {
         >
       </template>
       <div
-        v-if="unlocked >= 3"
+        v-if="unlocked >= steps.findIndex(({ id }) => id === 'rubric')"
         v-show="view === 'rubric'"
         class="rubric-workbench"
       >
@@ -471,15 +545,16 @@ onBeforeUnmount(() => {
           v-model="draft"
           :project-id="projectId"
           :reference-answer="referenceAnswer"
+          :revision-request="trialRevisionRequest"
           :disabled="busy || running"
+          @clear-revision="trialRevisionRequest = undefined"
+          @return-to-trial="view = 'trial'"
           @working="rubricBusy = $event"
           @save="
             (applied) =>
               savePhase(draft, view, applied ? '评分草稿已保存' : undefined)
           "
-          @confirm="
-            savePhase({ ...draft, phase: 'ready' }, 'trial', '评分细则已确认')
-          "
+          @confirm="confirmRubric"
         />
       </div>
       <n-space
@@ -548,6 +623,13 @@ onBeforeUnmount(() => {
             >试阅已通过</n-tag
           >
         </n-space>
+        <p v-if="snapshot.trial && !currentTrial">
+          以下保留上一轮试阅。{{
+            draftReady
+              ? '请开始新一轮试阅后再确认通过。'
+              : '请确认修改后的评分细则，再开始新一轮试阅。'
+          }}
+        </p>
         <p v-if="!draftReady || !configured">请先保存 API、题框和评分细则。</p>
       </n-card>
 
@@ -644,8 +726,10 @@ onBeforeUnmount(() => {
             {{
               activeRun.rows.filter((row) => row.status !== 'pending').length
             }}
-            / {{ activeRun.rows.length }} 个小题 · 已复核
-            {{ activeRun.rows.filter((row) => row.audit).length }} 项</span
+            / {{ activeRun.rows.length }} 项<span v-if="view !== 'trial'">
+              · 已复核
+              {{ activeRun.rows.filter((row) => row.audit).length }} 项</span
+            ></span
           >
           <n-button
             v-if="
@@ -668,25 +752,39 @@ onBeforeUnmount(() => {
         <n-card
           v-if="view === 'trial' && activeRun.status === 'review'"
           size="small"
-          title="考生作答概况"
+          title="逐题试阅汇总"
         >
           <p>
-            以下统计来自本轮试阅的 AI 结果。空白按 0
-            分计入，辨认不清和处理失败单独列出。
+            按题查看分数分布、采分点和典型作答。发现给分标准需要调整时，可在细则助手中修订本题。
           </p>
-          <details
+          <section
             v-for="item in snapshot.report"
             :key="item.questionId"
             class="report"
           >
-            <summary>
-              {{ item.questionId }} · 已计分 {{ item.graded }}/{{
-                item.sampled
-              }}
-              · 均分 {{ item.mean?.toFixed(2) ?? '—' }} · 空白
-              {{ item.blank }} · 辨认不清 {{ item.unreadable }} · 失败
-              {{ item.failed }}
-            </summary>
+            <n-space
+              class="report-header"
+              justify="space-between"
+              align="center"
+            >
+              <strong>第 {{ item.questionId }} 题</strong>
+              <n-button
+                size="small"
+                :disabled="
+                  busy ||
+                  running ||
+                  !draft.questions.some(({ id }) => id === item.questionId)
+                "
+                :aria-label="`在细则助手中修订第 ${item.questionId} 题`"
+                @click="reviseTrialQuestion(item)"
+                >在细则助手中修订</n-button
+              >
+            </n-space>
+            <p>
+              已计分 {{ item.graded }}/{{ item.sampled }} · 均分
+              {{ item.mean?.toFixed(2) ?? '—' }} · 空白 {{ item.blank }} ·
+              辨认不清 {{ item.unreadable }} · 失败 {{ item.failed }}
+            </p>
             <p>
               分数分布
               {{
@@ -701,23 +799,37 @@ onBeforeUnmount(() => {
                 {{ point.full }}/{{ item.graded }}
               </li>
             </ul>
-            <div
-              v-for="example in item.examples"
-              :key="example.paperCode"
-              class="example"
-            >
-              <strong>{{ example.paperCode }}</strong>
-              <div>{{ example.transcript }}</div>
-              <div>{{ example.comment }}</div>
-            </div>
-          </details>
+            <details v-if="item.examples.length">
+              <summary>典型作答（{{ item.examples.length }} 份）</summary>
+              <div
+                v-for="example in item.examples"
+                :key="example.paperCode"
+                class="example"
+              >
+                <strong>{{ example.paperCode }}</strong>
+                <div>{{ example.transcript }}</div>
+                <div>{{ example.comment }}</div>
+              </div>
+            </details>
+          </section>
+          <n-button
+            size="small"
+            :aria-expanded="showTrialScripts"
+            @click="showTrialScripts = !showTrialScripts"
+            >{{ showTrialScripts ? '收起单卷明细' : '查看单卷明细' }}</n-button
+          >
         </n-card>
         <HistoryReview
+          v-if="view !== 'trial' || showTrialScripts"
           :key="activeRun.id"
           :project-id="projectId"
           :run="activeRun"
           :identities="activeRun.identities ?? snapshot.identities"
-          :editable="view !== 'archive' && activeRun.status === 'review'"
+          :editable="
+            view !== 'archive' &&
+            activeRun.status === 'review' &&
+            (view !== 'trial' || currentTrial)
+          "
           :busy="busy || running"
           @correct="correct"
           @audit="
@@ -751,7 +863,14 @@ onBeforeUnmount(() => {
   gap: 14px;
 }
 .report {
-  padding: 6px 0;
+  padding: 12px 0;
+  border-top: 1px solid #778f9d40;
+}
+.report-header {
+  margin-bottom: 8px;
+}
+.report p {
+  margin: 5px 0;
 }
 .report summary {
   cursor: pointer;

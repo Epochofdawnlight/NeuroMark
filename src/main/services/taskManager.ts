@@ -252,6 +252,13 @@ export class TaskManager {
       WHERE status='running' AND kind IN ('history-trial','history-formal')`,
       )
       .run(now);
+    db.$client
+      .prepare(
+        `UPDATE tasks SET status='failed', abortable=0, eta=NULL,
+      summary='应用已重启，请回项目重新识别学号', finished_at=?, updated_at=?
+      WHERE status='running' AND kind='history-identity'`,
+      )
+      .run(now, now);
     await this.emit();
   }
 

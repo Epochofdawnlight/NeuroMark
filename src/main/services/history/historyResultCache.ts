@@ -5,6 +5,7 @@ import type { gradeHistoryImage } from './historyModels';
 type Images = Awaited<ReturnType<typeof gradeHistoryImage>>;
 type CachedResult =
   | { kind: 'written'; value: Images }
+  | { kind: 'choice-regions'; value: [string, OpticalMark][] }
   | { kind: 'choice'; value: OpticalMark };
 
 function cache() {

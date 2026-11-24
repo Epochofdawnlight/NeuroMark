@@ -10,6 +10,7 @@ import {
   NSelect,
   NSpace,
   NTag,
+  type InputInst,
 } from 'naive-ui';
 import type {
   ExamRubricProposal,
@@ -22,14 +23,18 @@ const props = defineProps<{
   projectId: string;
   referenceAnswer: string;
   disabled: boolean;
+  revisionRequest?: { runId: string; questionId: string; text: string };
 }>();
 const emit = defineEmits<{
   confirm: [];
   save: [applied: boolean];
   working: [value: boolean];
+  clearRevision: [];
+  returnToTrial: [];
 }>();
 const draft = defineModel<HistoryDraft>({ required: true });
 const request = ref('');
+const unsentRequests = new Map<string, string>();
 const files = ref<File[]>([]);
 const includeReference = ref(false);
 const waiting = ref(false);
@@ -37,6 +42,7 @@ const error = ref('');
 const checked = ref(false);
 const transcript = ref<HTMLElement>();
 const uploader = ref<HTMLInputElement>();
+const composer = ref<InputInst>();
 const chat = computed(() => draft.value.rubricChat ?? []);
 const suggestion = computed(() => draft.value.rubricSuggestion);
 const existingMaterial = computed(() =>
@@ -49,10 +55,15 @@ const hasReference = computed(
 );
 const canSend = computed(() =>
   Boolean(
-    request.value.trim() ||
-    files.value.length ||
-    includeReference.value ||
-    (!chat.value.length && existingMaterial.value),
+    (request.value.trim() ||
+      files.value.length ||
+      includeReference.value ||
+      (!chat.value.length && existingMaterial.value)) &&
+    (!props.revisionRequest ||
+      files.value.length ||
+      includeReference.value ||
+      (request.value.trim() &&
+        request.value.trim() !== props.revisionRequest.text.trim())),
   ),
 );
 const hasRules = computed(() =>
@@ -65,6 +76,27 @@ watch([() => chat.value.length, waiting], async () => {
     transcript.value.scrollTop = transcript.value.scrollHeight;
 });
 watch(waiting, (value) => emit('working', value), { flush: 'sync' });
+function revisionScope(revision: typeof props.revisionRequest) {
+  return revision ? JSON.stringify([revision.runId, revision.questionId]) : '';
+}
+
+watch(
+  () => props.revisionRequest,
+  async (current, previous) => {
+    const previousScope = revisionScope(previous);
+    if (request.value.trim()) unsentRequests.set(previousScope, request.value);
+    else unsentRequests.delete(previousScope);
+    request.value = current
+      ? (unsentRequests.get(revisionScope(current)) ?? `${current.text}\n`)
+      : (unsentRequests.get(revisionScope(current)) ?? '');
+    if (current) {
+      await nextTick();
+      const input = composer.value?.textareaElRef;
+      input?.focus();
+      input?.setSelectionRange(request.value.length, request.value.length);
+    }
+  },
+);
 
 function selectFiles(event: Event) {
   const input = event.target as HTMLInputElement;
@@ -88,7 +120,9 @@ async function send() {
   const text = request.value.trim();
   const attachments = files.value.map((file) => file.name);
   const prior = draft.value;
-  const initialText = !chat.value.length && !existingMaterial.value ? text : '';
+  const questionId = props.revisionRequest?.questionId;
+  const initialText =
+    !questionId && !chat.value.length && !existingMaterial.value ? text : '';
   waiting.value = true;
   error.value = '';
   try {
@@ -112,7 +146,9 @@ async function send() {
     ]
       .filter((value) => value.trim())
       .join('\n\n');
-    const instruction = text || '请根据已有材料整理逐题评分细则。';
+    const instruction = questionId
+      ? `这轮仅讨论并修改题号 ${questionId}，其他题的细则保持原样。\n${text}`
+      : text || '请根据已有材料整理逐题评分细则。';
     const nextDraft = { ...prior, material };
     const reply = await window.neuromark.history.proposeRubric(
       props.projectId,
@@ -126,7 +162,14 @@ async function send() {
         { role: 'teacher', text: text || instruction, attachments },
         { role: 'assistant', text: reply.message },
       ],
-      rubricSuggestion: combineSuggestion(reply),
+      rubricSuggestion: combineSuggestion(
+        questionId
+          ? {
+              ...reply,
+              items: reply.items.filter(({ id }) => id === questionId),
+            }
+          : reply,
+      ),
     };
     request.value = '';
     files.value = [];
@@ -161,6 +204,25 @@ function addRule(question: HistoryQuestion) {
 
 <template>
   <n-card size="small" title="评分细则助手" class="chat-card">
+    <n-alert v-if="revisionRequest" type="info" class="revision-banner">
+      <n-space align="center">
+        <span>试阅修订 · 第 {{ revisionRequest.questionId }} 题</span>
+        <n-button
+          size="small"
+          :disabled="disabled || waiting"
+          @click="emit('returnToTrial')"
+        >
+          返回试阅汇总
+        </n-button>
+        <n-button
+          size="small"
+          :disabled="disabled || waiting"
+          @click="emit('clearRevision')"
+        >
+          退出本题修订
+        </n-button>
+      </n-space>
+    </n-alert>
     <div
       ref="transcript"
       class="transcript"
@@ -270,6 +332,7 @@ function addRule(question: HistoryQuestion) {
         >
       </n-space>
       <n-input
+        ref="composer"
         v-model:value="request"
         type="textarea"
         :autosize="{ minRows: 3, maxRows: 8 }"
@@ -430,6 +493,9 @@ function addRule(question: HistoryQuestion) {
 </template>
 
 <style scoped>
+.revision-banner {
+  margin-bottom: 10px;
+}
 .transcript {
   display: grid;
   align-content: start;

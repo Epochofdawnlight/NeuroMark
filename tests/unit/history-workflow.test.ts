@@ -172,9 +172,13 @@ it('grades each image once with bounded concurrency and reuses unchanged trial r
       status: 'scored',
       transcript: '工商业发展',
     });
-    await expect(service.approveTrial('p', first.id)).rejects.toThrow('抽检');
+    await service.approveTrial('p', first.id);
+    expect((await service.get('p')).approvedTrialId).toBe(first.id);
     draft.questions[0].criteria[0].text = '工商业或贸易发展';
     await service.saveDraft('p', 1, draft);
+    await expect(service.approveTrial('p', first.id)).rejects.toThrow(
+      '重新试阅',
+    );
     await service.start('p', 'trial', 1, true);
     const second = await trial();
     await service.audit(
@@ -254,8 +258,8 @@ it('prepares an exam from mixed material and grades its 2B row locally', async (
   const dir = await mkdtemp(path.join(os.tmpdir(), 'neuromark-exam-'));
   const vision = await modelServer((req) => {
     const system = String(req.messages[0].content);
-    if (system.includes('最终保留的手写选项'))
-      return { status: 'single', options: ['B'] };
+    if (system.includes('同一份卷子的手写选择题'))
+      return { choices: [{ id: '1', status: 'single', options: ['B'] }] };
     if (system.includes('印刷的小题'))
       return {
         items: [
@@ -418,6 +422,169 @@ it('prepares an exam from mixed material and grades its 2B row locally', async (
       grade: { score: 2 },
     });
     expect(vision.requests).toHaveLength(4);
+  } finally {
+    shared.database.close();
+    vision.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+it('binds cropped student IDs locally and grades multiple handwriting grids in one request per paper', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'neuromark-identity-'));
+  const studentIds = ['0031', '0032', '0032', '0099', 31];
+  const vision = await modelServer(async ({ messages }) => {
+    const images = messages[1].content as {
+      type: string;
+      image_url?: { url: string };
+    }[];
+    if (String(messages[0].content).includes('考生填写的学号')) {
+      expect(images).toHaveLength(2);
+      const crop = sharp(
+        Buffer.from(images[1].image_url!.url.split(',')[1], 'base64'),
+      );
+      expect(await crop.metadata()).toMatchObject({ width: 50, height: 25 });
+      const pixels = await crop.raw().toBuffer();
+      return { status: 'readable', studentId: studentIds[pixels[0] - 20] };
+    }
+    expect(images).toHaveLength(3);
+    return {
+      choices: [
+        { id: '1', status: 'single', options: ['B'] },
+        { id: '2', status: 'single', options: ['A'] },
+        { id: '13', status: 'blank', options: [] },
+      ],
+    };
+  });
+  shared.database = new DatabaseSync(':memory:');
+  shared.database.exec(`
+    CREATE TABLE projects (id TEXT PRIMARY KEY);
+    INSERT INTO projects VALUES ('identity-exam');
+    CREATE TABLE history_workspaces (project_id TEXT PRIMARY KEY, state_json TEXT NOT NULL);
+    CREATE TABLE history_provider_defaults (role TEXT PRIMARY KEY, config_json TEXT NOT NULL);
+  `);
+  try {
+    const projectId = 'identity-exam';
+    const papers: PaperRecord[] = await Promise.all(
+      studentIds.map(async (_, index) => {
+        const paperCode = String(index + 1);
+        const scan = path.join(dir, `${paperCode}.png`);
+        await sharp({
+          create: {
+            width: 100,
+            height: 100,
+            channels: 3,
+            background: { r: 20 + index, g: 255, b: 255 },
+          },
+        })
+          .png()
+          .toFile(scan);
+        return {
+          id: paperCode,
+          projectId,
+          paperCode,
+          pageCount: 1,
+          scanStatus: 'completed',
+          gradingStatus: 'pending',
+          originalPages: [
+            {
+              pageIndex: 0,
+              originalPath: scan,
+              scannedPath: scan,
+              scannedVersion: Math.trunc((await stat(scan)).mtimeMs),
+            },
+          ],
+        };
+      }),
+    );
+    const service = new HistoryService({
+      getProjectById: async () => ({ id: projectId }),
+      listProjectPapers: async () => papers,
+    } as unknown as ProjectService);
+    await service.saveDefaultProvider('recognition', {
+      baseUrl: vision.baseUrl,
+      model: 'vision',
+      apiKey: 'fake',
+    });
+    const rosterText = '学号，姓名\n0031 张三\n0032\t李四';
+    const region = { page: 0, x: 0.25, y: 0.25, width: 0.5, height: 0.25 };
+    await expect(
+      service.saveIdentitySetup(projectId, {
+        rosterText: '0031 张三\n0031 李四',
+        region,
+      }),
+    ).rejects.toThrow('重复');
+    await service.recognizeIdentities(projectId, { rosterText, region });
+    await vi.waitFor(async () =>
+      expect((await service.get(projectId)).identityStatus).toBe('completed'),
+    );
+    const identities = await service.get(projectId);
+    expect(identities.identities).toEqual({
+      '1': { studentId: '0031', name: '张三' },
+    });
+    expect(identities.identityResults?.map(({ status }) => status)).toEqual([
+      'matched',
+      'duplicate',
+      'duplicate',
+      'unmatched',
+      'unreadable',
+    ]);
+    expect(JSON.stringify(vision.requests)).not.toContain('张三');
+    expect(vision.requests).toHaveLength(5);
+    await service.bindStudent(projectId, '2', '0032', '李四');
+    await expect(
+      service.bindStudent(projectId, '3', '0032', '李四'),
+    ).rejects.toThrow('已绑定');
+
+    const draft: HistoryDraft = {
+      phase: 'ready',
+      reference: '',
+      material: '',
+      fullPageRegionsConfirmed: true,
+      choiceMode: 'handwritten',
+      questions: [
+        ['1', 'B'],
+        ['2', 'D'],
+        ['13', 'A'],
+      ].map(([id, answerKey]) => ({
+        id,
+        answerKey: answerKey as 'A' | 'B' | 'D',
+        kind: 'choice',
+        prompt: '',
+        reference: '',
+        maxScore: 2,
+        regions: [],
+        criteria: [],
+      })),
+      choiceGrids: [
+        {
+          id: 'section-1',
+          orientation: 'rows',
+          questionIds: ['1', '2'],
+          region: { ...region, y: 0.4 },
+        },
+        {
+          id: 'section-2',
+          orientation: 'columns',
+          questionIds: ['13'],
+          region: { ...region, y: 0.7 },
+        },
+      ],
+    };
+    await service.saveDraft(projectId, 0, draft);
+    await service.start(projectId, 'trial', 1, false, 3);
+    await vi.waitFor(async () =>
+      expect((await service.get(projectId)).trial?.status).toBe('review'),
+    );
+    const trial = (await service.get(projectId)).trial!;
+    expect(trial.rows.map((row) => row.status)).toEqual([
+      'scored',
+      'scored',
+      'blank',
+    ]);
+    expect(trial.rows.map((row) => row.grade?.score ?? 0)).toEqual([2, 0, 0]);
+    expect(trial.rows.every((row) => !row.audit)).toBe(true);
+    expect(vision.requests).toHaveLength(6);
+    await service.approveTrial(projectId, trial.id);
   } finally {
     shared.database.close();
     vision.close();

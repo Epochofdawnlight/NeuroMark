@@ -38,6 +38,8 @@ export function registerHistoryIpc(
   handle('adopt-providers', 'adoptProviders');
   handle('preview-regions', 'previewRegions');
   handle('get-run', 'getRun');
+  handle('save-identity-setup', 'saveIdentitySetup');
+  handle('recognize-identities', 'recognizeIdentities');
   handle('bind-student', 'bindStudent');
   handle('save-providers', 'saveProviders');
   handle('test-provider', 'testProvider');
